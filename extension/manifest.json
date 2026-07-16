@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Fantasy Edge",
+  "description": "RTSports lineup optimizer",
+  "version": "0.1.0",
+
+  "action": {
+    "default_title": "Fantasy Edge"
+  },
+
+  "permissions": [
+    "storage"
+  ],
+
+  "host_permissions": [
+    "https://*.rtsports.com/*",
+    "https://rtsports.com/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.rtsports.com/*",
+        "https://rtsports.com/*"
+      ],
+      "js": [
+        "dist/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -11,47 +11,62 @@ console.log(
 try {
   const roster = parseRoster();
 
-  console.log('Roster');
-  console.table(
-    roster.map(player => ({
-      Group: player.rosterGroup,
-      Slot: player.lineupSlot,
-      Name: player.name,
-      Pos: player.position,
-      Team: player.nflTeam,
-      Proj: player.projection
-    }))
-  );
-
-  console.log('Calling optimizer...');
-
   const optimized = optimizeLineup(roster);
 
-  console.log('Optimizer complete.');
+  console.group('Fantasy Edge Summary');
+
+  console.log(
+    'Current Projection:',
+    optimized.currentProjectedPoints.toFixed(2)
+  );
+
+  console.log(
+    'Optimized Projection:',
+    optimized.optimizedProjectedPoints.toFixed(2)
+  );
+
+  console.log(
+    'Potential Gain:',
+    optimized.projectedGain.toFixed(2)
+  );
+
+  console.groupEnd();
+
+  console.group('Recommended Lineup');
 
   console.table(
     optimized.lineup.map(slot => ({
       Slot: slot.slot,
       Player: slot.player.name,
-      Projection: slot.player.projection
+      Position: slot.player.position,
+      Team: slot.player.nflTeam,
+      Projection: slot.player.projection,
+      Score:
+        slot.player.adjustedProjection ??
+        slot.player.projection
     }))
   );
+
+  console.groupEnd();
+
+  console.group('Recommended Changes');
 
   console.table(
     optimized.changes.map(change => ({
-      Slot: change.slot,
-      Start: change.add.name,
-      Bench: change.remove?.name,
-      Gain: change.projectedGain
+      Start: change.recommended.name,
+      Bench: change.current.name,
+      Gain: change.projectedGain.toFixed(2)
     }))
   );
 
+  console.groupEnd();
+
+  // Expose for debugging
   (window as any).fantasyEdge = {
     roster,
     optimized
   };
 
-  console.log('FantasyEdge object attached to window.');
-} catch (err) {
-  console.error('Fantasy Edge crashed:', err);
+} catch (error) {
+  console.error('Fantasy Edge Error', error);
 }

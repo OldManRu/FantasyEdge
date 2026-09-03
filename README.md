@@ -31,3 +31,5 @@ Create a Cloudflare D1 database for Fantasy Edge and bind it to the Worker with 
 ## Current milestone
 
 The hosted React dashboard, extension download, RTSports sync transport, Worker API, and D1-backed roster persistence are wired together. The next milestone is validating the first live RTSports roster sync and then adding secure extension pairing plus broader league data collection.
+
+Cloudflare production builds are connected to the `main` branch so approved repository updates automatically publish the hosted application and current extension package.

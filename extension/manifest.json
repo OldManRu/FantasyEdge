@@ -1,31 +1,28 @@
 {
   "manifest_version": 3,
   "name": "Fantasy Edge",
-  "description": "RTSports lineup optimizer",
-  "version": "0.1.0",
-
+  "description": "RTSports sync bridge and lineup optimizer for Fantasy Edge",
+  "version": "0.2.0",
   "action": {
     "default_title": "Fantasy Edge"
   },
-
-  "permissions": [
-    "storage"
-  ],
-
+  "permissions": ["storage"],
   "host_permissions": [
     "https://*.rtsports.com/*",
-    "https://rtsports.com/*"
+    "https://rtsports.com/*",
+    "https://fantasyedge.rudarg.com/*"
   ],
-
+  "background": {
+    "service_worker": "dist/background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
       "matches": [
         "https://*.rtsports.com/*",
         "https://rtsports.com/*"
       ],
-      "js": [
-        "dist/content.js"
-      ],
+      "js": ["dist/content.js"],
       "run_at": "document_idle"
     }
   ]

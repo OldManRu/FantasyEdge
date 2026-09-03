@@ -24,6 +24,27 @@ const json = (body: unknown, init: ResponseInit = {}) =>
     },
   });
 
+async function ensureSchema(db: D1Database) {
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS roster_syncs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'rtsports',
+      page_url TEXT,
+      fantasy_team TEXT,
+      synced_at TEXT NOT NULL,
+      received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      player_count INTEGER NOT NULL,
+      roster_json TEXT NOT NULL,
+      optimized_json TEXT
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_roster_syncs_received_at
+      ON roster_syncs(received_at DESC)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_roster_syncs_device_id
+      ON roster_syncs(device_id, received_at DESC)`),
+  ]);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -46,6 +67,8 @@ export default {
       if (!payload?.deviceId || !payload?.syncedAt || !Array.isArray(payload.roster)) {
         return json({ ok: false, error: 'Invalid sync payload.' }, { status: 400 });
       }
+
+      await ensureSchema(env.DB);
 
       await env.DB.prepare(
         `INSERT INTO roster_syncs
@@ -71,6 +94,8 @@ export default {
       if (!env.DB) {
         return json({ ok: true, sync: null, storage: 'not-configured' });
       }
+
+      await ensureSchema(env.DB);
 
       const row = await env.DB.prepare(
         `SELECT id, device_id, source, page_url, fantasy_team, synced_at, received_at,

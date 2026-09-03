@@ -21,11 +21,5 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Typecheck hosted app
         run: npm run typecheck
-      - name: Build hosted app
-        run: npm run build
-      - name: Install extension dependencies
-        working-directory: extension
-        run: npm ci --no-audit --no-fund
-      - name: Build extension
-        working-directory: extension
+      - name: Build hosted app and extension download
         run: npm run build

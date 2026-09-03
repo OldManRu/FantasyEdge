@@ -31,6 +31,10 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; }
 .sync-state > div { border: 1px solid #213149; background: rgba(6,14,25,.55); border-radius: 15px; padding: 16px; }
 .sync-state span { display: block; color: #7789a1; font-size: .77rem; margin-bottom: 8px; }
 .sync-state strong { font-size: .96rem; }
+.roster-preview { display: grid; gap: 8px; margin-top: 18px; }
+.roster-row { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 10px 12px; border: 1px solid #20334c; border-radius: 12px; background: rgba(6,14,25,.48); }
+.roster-row strong { font-size: .9rem; }
+.roster-row span { color: #7f91a9; font-size: .78rem; white-space: nowrap; }
 .extension-card { display: grid; grid-template-columns: 1fr auto; gap: 24px; margin-top: 18px; padding: 26px; border: 1px solid rgba(89, 143, 215, .28); border-radius: 22px; background: linear-gradient(135deg, rgba(19,42,72,.92), rgba(10,22,38,.96)); box-shadow: 0 18px 45px rgba(0,0,0,.16); }
 .extension-actions { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 10px; min-width: 210px; }
 .download-button { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 18px; border-radius: 13px; background: #2563eb; text-decoration: none; font-weight: 800; color: white; box-shadow: 0 10px 24px rgba(37,99,235,.24); transition: transform .15s ease, background .15s ease; }
@@ -58,4 +62,5 @@ h2 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; }
 
 @media (max-width: 500px) {
   .install-steps { grid-template-columns: 1fr; }
+  .roster-row { align-items: flex-start; flex-direction: column; gap: 4px; }
 }

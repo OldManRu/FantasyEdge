@@ -7,15 +7,31 @@ type Health = {
   storage: string;
 };
 
+type LatestSync = {
+  fantasyTeam: string | null;
+  syncedAt: string;
+  playerCount: number;
+  source: string;
+  roster: Array<{ name?: string; position?: string; nflTeam?: string; rosterGroup?: string }>;
+};
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [latest, setLatest] = useState<LatestSync | null>(null);
 
   useEffect(() => {
     fetch('/api/health')
       .then((response) => response.json())
       .then(setHealth)
       .catch(() => setHealth(null));
+
+    fetch('/api/sync/latest')
+      .then((response) => response.json())
+      .then((body) => setLatest(body.sync ?? null))
+      .catch(() => setLatest(null));
   }, []);
+
+  const starters = latest?.roster.filter((player) => player.rosterGroup === 'starter').slice(0, 8) ?? [];
 
   return (
     <main className="shell">
@@ -30,7 +46,7 @@ export default function App() {
         </div>
         <div className={`status ${health?.ok ? 'online' : ''}`}>
           <span className="status-dot" />
-          {health?.ok ? 'Cloudflare backend online' : 'Checking backend'}
+          {health?.ok ? `Backend online · ${health.storage}` : 'Checking backend'}
         </div>
       </header>
 
@@ -39,43 +55,53 @@ export default function App() {
           <div className="card-heading">
             <div>
               <p className="label">RTSports Sync</p>
-              <h2>Waiting for first sync</h2>
+              <h2>{latest ? latest.fantasyTeam ?? 'Roster connected' : 'Waiting for first sync'}</h2>
             </div>
             <span className="pill">Extension bridge</span>
           </div>
           <p className="muted">
-            The browser extension will collect authenticated RTSports data and send
-            it here. Once synchronized, Fantasy Edge will be available from any device.
+            {latest
+              ? 'Fantasy Edge has received RTSports roster data and can now use it across devices.'
+              : 'Visit an RTSports roster page with the extension installed to send your first roster snapshot.'}
           </p>
           <div className="sync-state">
             <div>
               <span>Last sync</span>
-              <strong>Not connected</strong>
+              <strong>{latest ? new Date(latest.syncedAt).toLocaleString() : 'Not connected'}</strong>
             </div>
             <div>
               <span>Players imported</span>
-              <strong>0</strong>
+              <strong>{latest?.playerCount ?? 0}</strong>
             </div>
             <div>
               <span>Data source</span>
-              <strong>RTSports</strong>
+              <strong>{latest?.source?.toUpperCase() ?? 'RTSports'}</strong>
             </div>
           </div>
         </article>
 
         <article className="card">
           <p className="label">Roster</p>
-          <h2>No roster imported yet</h2>
-          <p className="muted">
-            Starters, bench, injury status, projections, and weekly scoring will appear here.
-          </p>
+          <h2>{latest ? `${latest.playerCount} players available` : 'No roster imported yet'}</h2>
+          {starters.length ? (
+            <div className="roster-preview">
+              {starters.map((player, index) => (
+                <div key={`${player.name}-${index}`} className="roster-row">
+                  <strong>{player.name ?? 'Unknown player'}</strong>
+                  <span>{player.position ?? ''} · {player.nflTeam ?? ''}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Starters, bench, injuries, projections, and weekly scoring will appear here.</p>
+          )}
         </article>
 
         <article className="card">
           <p className="label">Fantasy Edge Status</p>
-          <h2>Foundation online</h2>
+          <h2>{health?.storage === 'd1' ? 'Persistent storage online' : 'D1 connection pending'}</h2>
           <p className="muted">
-            Hosted dashboard and Worker API are ready for the RTSports synchronization layer.
+            The extension transport and hosted sync API are now wired. D1 is the remaining infrastructure binding for persistent roster history.
           </p>
         </article>
       </section>
@@ -85,19 +111,13 @@ export default function App() {
           <p className="label">Browser extension</p>
           <h2>Install the RTSports sync bridge</h2>
           <p className="muted">
-            Download the latest Fantasy Edge extension package. It is rebuilt and repackaged
-            automatically whenever the hosted app is deployed, so this button always points to
-            the current version.
+            Download the latest Fantasy Edge extension package. It is rebuilt and repackaged automatically whenever the hosted app is deployed.
           </p>
         </div>
-
         <div className="extension-actions">
-          <a className="download-button" href="/downloads/fantasy-edge-extension.zip" download>
-            Download Extension
-          </a>
+          <a className="download-button" href="/downloads/fantasy-edge-extension.zip" download>Download Extension</a>
           <span className="download-note">Chrome / Edge · Manifest V3</span>
         </div>
-
         <div className="install-steps">
           <span><strong>1.</strong> Download and unzip</span>
           <span><strong>2.</strong> Open browser extensions</span>
@@ -109,8 +129,8 @@ export default function App() {
       <section className="coming-next">
         <p className="label">Coming next</p>
         <div className="roadmap">
-          <span>Secure sync</span>
-          <span>Persistent league data</span>
+          <span>Secure pairing</span>
+          <span>Roster history</span>
           <span>Lineup optimizer</span>
           <span>Matchup intelligence</span>
           <span>Waiver recommendations</span>

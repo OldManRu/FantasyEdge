@@ -15,18 +15,24 @@ type LatestSync = {
   roster: Array<{ name?: string; position?: string; nflTeam?: string; rosterGroup?: string }>;
 };
 
+type LatestSyncResponse = {
+  ok: boolean;
+  storage?: string;
+  sync?: LatestSync | null;
+};
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [latest, setLatest] = useState<LatestSync | null>(null);
 
   useEffect(() => {
     fetch('/api/health')
-      .then((response) => response.json())
-      .then(setHealth)
+      .then(async (response) => (await response.json()) as Health)
+      .then((body) => setHealth(body))
       .catch(() => setHealth(null));
 
     fetch('/api/sync/latest')
-      .then((response) => response.json())
+      .then(async (response) => (await response.json()) as LatestSyncResponse)
       .then((body) => setLatest(body.sync ?? null))
       .catch(() => setLatest(null));
   }, []);

@@ -8,5 +8,12 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fantasy-edge",
+      "database_id": "e9b61cfc-4e25-4c50-ae2d-9a5bef2025d6"
+    }
+  ]
 }

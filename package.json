@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config vite.config.ts",
-    "build": "vite build --config vite.config.ts",
+    "build:extension": "npm --prefix extension ci --no-audit --no-fund && npm --prefix extension run build && node scripts/package-extension.mjs",
+    "build": "npm run build:extension && vite build --config vite.config.ts",
     "preview": "vite preview --config vite.config.ts",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit"

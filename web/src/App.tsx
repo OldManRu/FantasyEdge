@@ -80,6 +80,32 @@ export default function App() {
         </article>
       </section>
 
+      <section className="extension-card">
+        <div>
+          <p className="label">Browser extension</p>
+          <h2>Install the RTSports sync bridge</h2>
+          <p className="muted">
+            Download the latest Fantasy Edge extension package. It is rebuilt and repackaged
+            automatically whenever the hosted app is deployed, so this button always points to
+            the current version.
+          </p>
+        </div>
+
+        <div className="extension-actions">
+          <a className="download-button" href="/downloads/fantasy-edge-extension.zip" download>
+            Download Extension
+          </a>
+          <span className="download-note">Chrome / Edge · Manifest V3</span>
+        </div>
+
+        <div className="install-steps">
+          <span><strong>1.</strong> Download and unzip</span>
+          <span><strong>2.</strong> Open browser extensions</span>
+          <span><strong>3.</strong> Enable Developer mode</span>
+          <span><strong>4.</strong> Load unpacked folder</span>
+        </div>
+      </section>
+
       <section className="coming-next">
         <p className="label">Coming next</p>
         <div className="roadmap">

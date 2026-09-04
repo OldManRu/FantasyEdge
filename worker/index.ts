@@ -1,4 +1,5 @@
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
+import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
 
 export interface Env {
   ASSETS: Fetcher;
@@ -55,6 +56,12 @@ async function intelligenceIsStale(db: D1Database) {
   return !Number.isFinite(age) || age > 4 * 60 * 60 * 1000;
 }
 
+async function refreshWithSignals(db: D1Database) {
+  const result = await refreshIntelligence({ DB: db });
+  if (result.ok) await applyActiveSignalsToStoredIntelligence(db);
+  return result;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -94,7 +101,7 @@ export default {
       ).run();
 
       if (await intelligenceIsStale(env.DB)) {
-        ctx.waitUntil(refreshIntelligence({ DB: env.DB }));
+        ctx.waitUntil(refreshWithSignals(env.DB));
       }
 
       return json({ ok: true, playerCount: payload.roster.length, syncedAt: payload.syncedAt });
@@ -134,12 +141,18 @@ export default {
       return json({ ok: true, ...(await getLatestIntelligence(env.DB)) });
     }
 
+    if (url.pathname === '/api/signals/latest' && request.method === 'GET') {
+      if (!env.DB) return json({ ok: false, error: 'D1 storage is not configured.' }, { status: 503 });
+      const limit = Math.max(1, Math.min(250, Number(url.searchParams.get('limit') ?? 100)));
+      return json({ ok: true, signals: await latestSignals(env.DB, limit) });
+    }
+
     if (url.pathname.startsWith('/api/')) return json({ ok: false, error: 'Not found' }, { status: 404 });
     return env.ASSETS.fetch(request);
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     if (!env.DB) return;
-    ctx.waitUntil(refreshIntelligence({ DB: env.DB }));
+    ctx.waitUntil(refreshWithSignals(env.DB));
   },
 } satisfies ExportedHandler<Env>;

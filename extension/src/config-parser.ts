@@ -1,8 +1,8 @@
 import type { LeagueConfigSection } from '../../shared/models/league-config';
 
 const clean = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
-const SENSITIVE = /(uid|user.?id|session|token|csrf|auth|password|passwd|secret|key)/i;
-const NOISE = /^(home|logout|log out|help|support|privacy|terms|copyright|real.?time fantasy sports)$/i;
+const SENSITIVE = /(uid|user.?id|session|token|csrf|auth|password|passwd|secret|api.?key|access.?key)/i;
+const NOISE_HIDDEN = /^(x|submit|action|mode|page|tab|menu|nav|callback|return|redirect)$/i;
 
 function isSensitiveControl(element: Element) {
   if (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement)) return false;
@@ -13,10 +13,16 @@ function isSensitiveControl(element: Element) {
     element.getAttribute('aria-label'),
   ].filter(Boolean).join(' ');
   if (SENSITIVE.test(haystack)) return true;
-  if (element instanceof HTMLInputElement && ['password', 'hidden'].includes(element.type.toLowerCase())) {
-    return !/^lid$/i.test(element.name || element.id || '');
-  }
+  if (element instanceof HTMLInputElement && element.type.toLowerCase() === 'password') return true;
   return false;
+}
+
+function shouldCaptureHiddenInput(element: HTMLInputElement) {
+  if (element.type.toLowerCase() !== 'hidden') return true;
+  const name = clean(element.name || element.id);
+  if (!name || SENSITIVE.test(name)) return false;
+  if (NOISE_HIDDEN.test(name)) return false;
+  return true;
 }
 
 function valueFor(element: Element): string | number | boolean | null {
@@ -37,7 +43,7 @@ function labelFor(element: Element, index: number) {
   const id = element.getAttribute('id');
   const labelled = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
   const parentLabel = element.closest('label');
-  return clean(labelled?.textContent || parentLabel?.textContent || element.getAttribute('name') || element.getAttribute('aria-label')) || `setting_${index + 1}`;
+  return clean(labelled?.textContent || parentLabel?.textContent || element.getAttribute('name') || element.getAttribute('aria-label') || id) || `setting_${index + 1}`;
 }
 
 function uniqueKey(values: LeagueConfigSection['values'], desired: string) {
@@ -59,7 +65,6 @@ function valueForCell(value: string): string | number | boolean | null {
 function tableToSection(table: HTMLTableElement, tableIndex: number): LeagueConfigSection | null {
   const rows = Array.from(table.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tfoot > tr, :scope > tr'));
   if (!rows.length) return null;
-
   const rowCells = rows.map(row => Array.from(row.querySelectorAll(':scope > th, :scope > td')).map(cell => clean(cell.textContent)));
   const headerRowIndex = rowCells.findIndex((cells, index) => cells.length >= 2 && cells.some(Boolean) && Boolean(rows[index]?.querySelector('th')));
   const headers = headerRowIndex >= 0 ? rowCells[headerRowIndex].map((value, index) => value || `Column ${index + 1}`) : [];
@@ -68,12 +73,10 @@ function tableToSection(table: HTMLTableElement, tableIndex: number): LeagueConf
   rowCells.forEach((cells, rowIndex) => {
     const nonEmpty = cells.filter(Boolean);
     if (nonEmpty.length < 2 || rowIndex === headerRowIndex) return;
-
     if (cells.length === 2) {
       values[uniqueKey(values, cells[0])] = valueForCell(cells[1]);
       return;
     }
-
     const rowLabel = cells[0] || `Row ${rowIndex + 1}`;
     for (let columnIndex = 1; columnIndex < cells.length; columnIndex += 1) {
       const raw = cells[columnIndex];
@@ -91,64 +94,60 @@ function tableToSection(table: HTMLTableElement, tableIndex: number): LeagueConf
   return { name: heading || `Settings table ${tableIndex + 1}`, values };
 }
 
-function visibleTextSection(): LeagueConfigSection | null {
-  const raw = document.body?.innerText ?? '';
-  const lines = raw
-    .split(/\r?\n/)
-    .map(clean)
-    .filter(Boolean)
-    .filter(line => line.length <= 500)
-    .filter(line => !NOISE.test(line))
-    .filter(line => !SENSITIVE.test(line))
-    .filter(line => !/^LID\b/i.test(line));
+function visibleTextFallback(): LeagueConfigSection | null {
+  const root = document.querySelector('main, #content, #main, .content, form') || document.body;
+  if (!root) return null;
+  const candidates = Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,legend,label,th,td,button,a,option,span,div'))
+    .filter(element => {
+      const style = getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    })
+    .map(element => clean(element.textContent))
+    .filter(value => value.length > 0 && value.length <= 240 && /(scor|rush|pass|receiv|yard|touchdown|td\b|interception|fumble|kick|field goal|extra point|sack|tackle|assist|defen|return|conversion|point|bonus|lineup|roster|quarterback|running back|wide receiver|tight end|linebacker|defensive|head coach|flex)/i.test(value));
 
-  const meaningful = lines.filter(line => /(scor|point|yard|touchdown|reception|pass|rush|receiv|interception|fumble|sack|tackle|assist|kick|field goal|extra point|return|starter|lineup|roster|flex|quarterback|running back|wide receiver|tight end|defensive|linebacker|head coach|coach|minimum|maximum|bonus)/i.test(line));
-  if (!meaningful.length) return null;
-
+  const unique = Array.from(new Set(candidates)).slice(0, 250);
+  if (!unique.length) return null;
   const values: LeagueConfigSection['values'] = {};
-  meaningful.slice(0, 400).forEach((line, index) => {
-    values[`text_${String(index + 1).padStart(3, '0')}`] = line;
-  });
+  unique.forEach((text, index) => { values[`text_${String(index + 1).padStart(3, '0')}`] = text; });
   return { name: 'Visible RTSports settings text', values };
 }
 
 export function looksLikeCommissionerSettingsPage() {
-  const haystack = `${document.title} ${location.pathname} ${location.search} ${document.body?.innerText?.slice(0, 8000) ?? ''}`.toLowerCase();
+  const haystack = `${document.title} ${location.pathname} ${location.search} ${document.body?.innerText?.slice(0, 12000) ?? ''}`.toLowerCase();
   return /(commissioner|league setup|league settings|manage league|scoring|roster settings|lineup settings|waiver|playoff)/.test(haystack);
 }
 
 export function sanitizedPageUrl() {
   const url = new URL(location.href);
   for (const key of Array.from(url.searchParams.keys())) {
-    if (SENSITIVE.test(key) && !/^lid$/i.test(key)) url.searchParams.delete(key);
+    if ((SENSITIVE.test(key) || /^x$/i.test(key)) && !/^lid$/i.test(key)) url.searchParams.delete(key);
   }
   return url.toString();
 }
 
 export function relevantSettingsText() {
-  const visible = document.body?.innerText ?? '';
-  return visible
-    .split(/\r?\n/)
-    .map(clean)
-    .filter(Boolean)
-    .filter(line => !SENSITIVE.test(line))
-    .join('\n')
-    .slice(0, 50000);
+  const root = document.querySelector('main, #content, #main, .content, form') || document.body;
+  const text = clean(root?.textContent).slice(0, 50000);
+  return text;
 }
 
 export function parseLeagueConfig(): LeagueConfigSection[] {
   const sections: LeagueConfigSection[] = [];
   const used = new Set<Element>();
+  const formContainers = Array.from(document.querySelectorAll('fieldset, form, .panel, .card, .section, #content, #main, main'));
 
-  const formContainers = Array.from(document.querySelectorAll('fieldset, form, .panel, .card, .section'));
   for (const [containerIndex, container] of formContainers.entries()) {
-    const controls = Array.from(container.querySelectorAll('input, select, textarea')).filter(control => !used.has(control) && !isSensitiveControl(control));
+    const controls = Array.from(container.querySelectorAll('input, select, textarea')).filter(control => {
+      if (used.has(control) || isSensitiveControl(control)) return false;
+      if (control instanceof HTMLInputElement && !shouldCaptureHiddenInput(control)) return false;
+      return true;
+    });
     if (!controls.length) continue;
     const values: LeagueConfigSection['values'] = {};
     controls.forEach((control, index) => {
       used.add(control);
       const label = labelFor(control, index);
-      if (SENSITIVE.test(label) && !/^lid$/i.test(label)) return;
+      if (SENSITIVE.test(label)) return;
       const value = valueFor(control);
       if (value !== null && value !== '') values[uniqueKey(values, label)] = value;
     });
@@ -162,8 +161,8 @@ export function parseLeagueConfig(): LeagueConfigSection[] {
     if (section) sections.push(section);
   }
 
-  const textFallback = visibleTextSection();
-  if (textFallback) sections.push(textFallback);
+  const fallback = visibleTextFallback();
+  if (fallback) sections.push(fallback);
 
   const seen = new Set<string>();
   return sections.filter(section => {

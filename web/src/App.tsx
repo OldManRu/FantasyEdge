@@ -26,6 +26,7 @@ type LatestSync = {
 type LatestSyncResponse = { ok: boolean; storage?: string; sync?: LatestSync | null };
 
 const score = (player?: Player | null) => player?.adjustedProjection ?? player?.projection ?? player?.averagePoints ?? 0;
+const hasScore = (player?: Player | null) => score(player) > 0;
 const fmt = (value: number) => Number.isFinite(value) ? value.toFixed(1) : '0.0';
 
 export default function App() {
@@ -41,15 +42,26 @@ export default function App() {
     if (!latest) return null;
     const starters = latest.roster.filter(p => p.rosterGroup === 'starter');
     const bench = latest.roster.filter(p => p.rosterGroup === 'bench');
+    const scoredPlayers = latest.roster.filter(hasScore);
+    const hasLineupData = starters.some(hasScore) && bench.some(hasScore) && scoredPlayers.length >= 2;
     const current = starters.reduce((sum, p) => sum + score(p), 0);
-    const optimized = latest.optimized?.projectedPoints ?? current;
-    const changes = (latest.optimized?.changes ?? []).filter(c => c.add?.name).sort((a, b) => (b.projectedGain ?? 0) - (a.projectedGain ?? 0));
+    const optimized = hasLineupData ? (latest.optimized?.projectedPoints ?? current) : 0;
+    const changes = hasLineupData
+      ? (latest.optimized?.changes ?? []).filter(c => c.add?.name && (c.projectedGain ?? 0) > 0).sort((a, b) => (b.projectedGain ?? 0) - (a.projectedGain ?? 0))
+      : [];
     const alerts = latest.roster.filter(p => p.injury && !['', '-', 'healthy'].includes(String(p.injury).toLowerCase()));
-    const benchPressure = bench
-      .map(p => ({ player: p, edge: score(p) - Math.min(...starters.filter(s => s.position === p.position).map(score), Number.POSITIVE_INFINITY) }))
-      .filter(x => Number.isFinite(x.edge) && x.edge > 0)
-      .sort((a, b) => b.edge - a.edge);
-    return { starters, current, optimized, gain: optimized - current, changes, alerts, benchPressure };
+    const benchPressure = hasLineupData
+      ? bench
+          .filter(hasScore)
+          .map(p => {
+            const samePositionStarters = starters.filter(s => s.position === p.position && hasScore(s));
+            if (!samePositionStarters.length) return { player: p, edge: Number.NEGATIVE_INFINITY };
+            return { player: p, edge: score(p) - Math.min(...samePositionStarters.map(score)) };
+          })
+          .filter(x => Number.isFinite(x.edge) && x.edge > 0)
+          .sort((a, b) => b.edge - a.edge)
+      : [];
+    return { starters, current, optimized, gain: optimized - current, changes, alerts, benchPressure, hasLineupData, scoreCoverage: scoredPlayers.length };
   }, [latest]);
 
   const starters = insights?.starters.slice(0, 10) ?? [];
@@ -70,25 +82,25 @@ export default function App() {
         <section className="insights">
           <div className="section-title"><div><p className="label">This week</p><h2>Action Center</h2></div><span className="pill">Based on latest RTSports sync</span></div>
           <div className="insight-grid">
-            <article className={`insight-card ${insights.gain > 0.05 ? 'attention' : 'good'}`}>
+            <article className={`insight-card ${!insights.hasLineupData ? 'attention' : insights.gain > 0.05 ? 'attention' : 'good'}`}>
               <span className="insight-kicker">Lineup</span>
-              <strong>{insights.gain > 0.05 ? `+${fmt(insights.gain)} pts available` : 'Best lineup already set'}</strong>
-              <p>{topMove?.add?.name ? `Start ${topMove.add.name}${topMove.remove?.name ? ` over ${topMove.remove.name}` : ''}.` : 'No higher-scoring lineup change is currently identified from RTSports data.'}</p>
+              <strong>{!insights.hasLineupData ? 'Waiting for usable projections' : insights.gain > 0.05 ? `+${fmt(insights.gain)} pts available` : 'Best lineup already set'}</strong>
+              <p>{!insights.hasLineupData ? `Fantasy Edge only has scoring data for ${insights.scoreCoverage} of ${latest.playerCount} players, so it will not declare your lineup optimal yet.` : topMove?.add?.name ? `Start ${topMove.add.name}${topMove.remove?.name ? ` over ${topMove.remove.name}` : ''}.` : 'No higher-scoring lineup change is currently identified from the available RTSports data.'}</p>
             </article>
             <article className={`insight-card ${insights.alerts.length ? 'danger' : 'good'}`}>
               <span className="insight-kicker">Availability</span>
               <strong>{insights.alerts.length ? `${insights.alerts.length} player${insights.alerts.length === 1 ? '' : 's'} flagged` : 'No injury flags detected'}</strong>
               <p>{insights.alerts.length ? insights.alerts.slice(0, 3).map(p => `${p.name} (${p.injury})`).join(' · ') : 'Your synchronized roster has no current injury designations requiring attention.'}</p>
             </article>
-            <article className={`insight-card ${insights.benchPressure.length ? 'attention' : 'neutral'}`}>
+            <article className={`insight-card ${!insights.hasLineupData ? 'neutral' : insights.benchPressure.length ? 'attention' : 'neutral'}`}>
               <span className="insight-kicker">Bench pressure</span>
-              <strong>{insights.benchPressure.length ? `${insights.benchPressure.length} possible upgrade${insights.benchPressure.length === 1 ? '' : 's'}` : 'Starters lead their backups'}</strong>
-              <p>{insights.benchPressure[0] ? `${insights.benchPressure[0].player.name} is scoring ${fmt(insights.benchPressure[0].edge)} above the lowest same-position starter.` : 'No bench player currently grades above a same-position starter.'}</p>
+              <strong>{!insights.hasLineupData ? 'Cannot compare yet' : insights.benchPressure.length ? `${insights.benchPressure.length} possible upgrade${insights.benchPressure.length === 1 ? '' : 's'}` : 'Starters lead their backups'}</strong>
+              <p>{!insights.hasLineupData ? 'Bench-versus-starter comparisons are disabled until Fantasy Edge has real projection or scoring values.' : insights.benchPressure[0] ? `${insights.benchPressure[0].player.name} is scoring ${fmt(insights.benchPressure[0].edge)} above the lowest same-position starter.` : 'No bench player currently grades above a same-position starter.'}</p>
             </article>
             <article className="insight-card neutral">
-              <span className="insight-kicker">Projected lineup</span>
-              <strong>{fmt(insights.optimized)} pts</strong>
-              <p>Current starter baseline: {fmt(insights.current)}. This will become more powerful as weekly matchup and projection feeds are added.</p>
+              <span className="insight-kicker">Projection coverage</span>
+              <strong>{insights.scoreCoverage}/{latest.playerCount} players</strong>
+              <p>{insights.hasLineupData ? `Optimized lineup: ${fmt(insights.optimized)} pts · Current starter baseline: ${fmt(insights.current)}.` : 'The roster is connected, but the current RTSports snapshot is not providing enough non-zero projection/scoring data to rank lineup choices reliably.'}</p>
             </article>
           </div>
         </section>
@@ -99,7 +111,7 @@ export default function App() {
           <div className="card-heading"><div><p className="label">RTSports Sync</p><h2>{latest ? latest.fantasyTeam ?? 'Roster connected' : 'Waiting for first sync'}</h2></div><span className="pill">Extension bridge</span></div>
           <p className="muted">{latest ? 'Fantasy Edge has received RTSports roster data and can now use it across devices.' : 'Visit an RTSports roster page with the extension installed to send your first roster snapshot.'}</p>
           <div className="sync-state"><div><span>Last sync</span><strong>{latest ? new Date(latest.syncedAt).toLocaleString() : 'Not connected'}</strong></div><div><span>Players imported</span><strong>{latest?.playerCount ?? 0}</strong></div><div><span>Data source</span><strong>{latest?.source?.toUpperCase() ?? 'RTSports'}</strong></div></div>
-          {insights?.changes.length ? <div className="moves"><p className="label">Recommended changes</p>{insights.changes.slice(0, 5).map((change, i) => <div className="move-row" key={`${change.add?.name}-${i}`}><div><strong>START {change.add?.name}</strong><span>{change.remove?.name ? `Bench ${change.remove.name}` : 'Open lineup slot'}</span></div><b>+{fmt(change.projectedGain ?? 0)}</b></div>)}</div> : null}
+          {insights?.hasLineupData && insights.changes.length ? <div className="moves"><p className="label">Recommended changes</p>{insights.changes.slice(0, 5).map((change, i) => <div className="move-row" key={`${change.add?.name}-${i}`}><div><strong>START {change.add?.name}</strong><span>{change.remove?.name ? `Bench ${change.remove.name}` : 'Open lineup slot'}</span></div><b>+{fmt(change.projectedGain ?? 0)}</b></div>)}</div> : null}
         </article>
 
         <article className="card"><p className="label">Starting lineup</p><h2>{latest ? `${insights?.starters.length ?? 0} starters detected` : 'No roster imported yet'}</h2>{starters.length ? <div className="roster-preview">{starters.map((p, i) => <div key={`${p.name}-${i}`} className="roster-row"><div><strong>{p.name ?? 'Unknown player'}</strong><small>{p.lineupSlot ?? p.position ?? ''}</small></div><span>{p.position ?? ''} · {p.nflTeam ?? ''}{p.opponent ? ` · ${p.opponent}` : ''}</span></div>)}</div> : <p className="muted">Starters, bench, injuries, projections, and weekly scoring will appear here.</p>}</article>

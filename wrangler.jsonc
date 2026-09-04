@@ -15,5 +15,8 @@
       "database_name": "fantasy-edge",
       "database_id": "e9b61cfc-4e25-4c50-ae2d-9a5bef2025d6"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["17 10,22 * * *"]
+  }
 }

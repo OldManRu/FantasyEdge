@@ -1,18 +1,17 @@
-const API_URL = 'https://fantasyedge.rudarg.com/api/sync/roster';
+const API_BASE = 'https://fantasyedge.rudarg.com/api';
 
 type SyncMessage = {
-  type: 'FANTASY_EDGE_SYNC_ROSTER';
+  type: 'FANTASY_EDGE_SYNC_ROSTER' | 'FANTASY_EDGE_SYNC_CONFIG';
   payload: unknown;
 };
 
 chrome.runtime.onMessage.addListener((message: SyncMessage, _sender, sendResponse) => {
-  if (message?.type !== 'FANTASY_EDGE_SYNC_ROSTER') return;
+  if (!message || !['FANTASY_EDGE_SYNC_ROSTER', 'FANTASY_EDGE_SYNC_CONFIG'].includes(message.type)) return;
 
-  void fetch(API_URL, {
+  const endpoint = message.type === 'FANTASY_EDGE_SYNC_CONFIG' ? '/sync/config' : '/sync/roster';
+  void fetch(`${API_BASE}${endpoint}`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(message.payload),
   })
     .then(async (response) => {
@@ -20,11 +19,7 @@ chrome.runtime.onMessage.addListener((message: SyncMessage, _sender, sendRespons
       sendResponse({ ok: response.ok, status: response.status, body });
     })
     .catch((error) => {
-      sendResponse({
-        ok: false,
-        status: 0,
-        body: { error: error instanceof Error ? error.message : 'Sync failed' },
-      });
+      sendResponse({ ok: false, status: 0, body: { error: error instanceof Error ? error.message : 'Sync failed' } });
     });
 
   return true;

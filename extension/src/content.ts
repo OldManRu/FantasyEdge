@@ -1,6 +1,6 @@
 import { parseRoster } from './roster-parser';
 import { optimizeLineup } from '../../shared/optimizer/lineup-optimizer';
-import { looksLikeCommissionerSettingsPage, parseLeagueConfig } from './config-parser';
+import { looksLikeCommissionerSettingsPage, parseLeagueConfig, relevantSettingsText, sanitizedPageUrl } from './config-parser';
 
 console.clear();
 console.log('%cFantasy Edge', 'font-size:18px;font-weight:bold;color:#2563eb;');
@@ -32,11 +32,11 @@ async function syncConfigIfPresent() {
     schemaVersion: 1,
     source: 'rtsports',
     deviceId,
-    pageUrl: location.href,
+    pageUrl: sanitizedPageUrl(),
     syncedAt: new Date().toISOString(),
     pageTitle: document.title,
     sections,
-    rawText: document.body?.innerText?.slice(0, 50000) ?? '',
+    rawText: relevantSettingsText(),
   });
   console.info(`Fantasy Edge discovered ${sections.length} commissioner settings sections.`);
   return true;

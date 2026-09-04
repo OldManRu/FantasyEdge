@@ -1,227 +1,60 @@
 import { LeaguePlayer } from '../models/league-player';
-import {
-  OptimizedLineup,
-  LineupChange,
-  LineupSlot,
-} from '../models/lineup';
+import { OptimizedLineup, LineupChange, LineupSlot } from '../models/lineup';
+import { DEFAULT_LINEUP_RULES, LeagueLineupRules } from '../models/lineup-rules';
 
 function playerScore(player: LeaguePlayer): number {
-  // Never recommend players on IR or Out
-  if (
-    player.injury === 'IR' ||
-    player.injury === 'O'
-  ) {
-    return -9999;
-  }
-
-  // Version 1
-  // Later we'll enhance this with matchup,
-  // weather, Vegas, trends, etc.
-  return (
-    player.projection ??
-    player.averagePoints ??
-    0
-  );
+  if (player.injury === 'IR' || player.injury === 'O') return -9999;
+  return player.adjustedProjection ?? player.projection ?? player.averagePoints ?? 0;
 }
 
-function bestPlayers(
-  candidates: LeaguePlayer[],
-  count: number,
-  used: Set<number>
-): LeaguePlayer[] {
+function availablePlayers(roster: LeaguePlayer[]) {
+  return roster.filter(player => player.rosterGroup !== 'ir' && player.injury !== 'IR' && player.injury !== 'O');
+}
+
+function bestEligible(candidates: LeaguePlayer[], count: number, used: Set<number>) {
   return candidates
     .filter(player => !used.has(player.id))
     .sort((a, b) => playerScore(b) - playerScore(a))
-    .slice(0, count);
+    .slice(0, Math.max(0, count));
 }
 
 export function optimizeLineup(
-  roster: LeaguePlayer[]
+  roster: LeaguePlayer[],
+  rules: LeagueLineupRules = DEFAULT_LINEUP_RULES,
 ): OptimizedLineup {
-
-  // Remove unavailable players
-  const available = roster.filter(player => {
-
-    if (player.rosterGroup === 'ir')
-      return false;
-
-    if (player.injury === 'IR')
-      return false;
-
-    if (player.injury === 'O')
-      return false;
-
-    return true;
-  });
-
+  const available = availablePlayers(roster);
   const used = new Set<number>();
-
   const lineup: LineupSlot[] = [];
 
-  function addPosition(
-    slot: string,
-    candidates: LeaguePlayer[],
-    count: number
-  ) {
-
-    const selected = bestPlayers(
-      candidates,
-      count,
-      used
-    );
-
-    selected.forEach(player => {
-
+  for (const rule of rules.slots) {
+    const eligible = new Set(rule.eligiblePositions.map(position => position.toUpperCase()));
+    const candidates = available.filter(player => eligible.has(player.position.toUpperCase()));
+    const selected = bestEligible(candidates, rule.count, used);
+    for (const player of selected) {
       used.add(player.id);
-
-      lineup.push({
-        slot,
-        player
-      });
-
-    });
-
+      lineup.push({ slot: rule.slot, player });
+    }
   }
 
-  addPosition(
-    'QB',
-    available.filter(p => p.position === 'QB'),
-    1
-  );
-
-  addPosition(
-    'RB',
-    available.filter(p => p.position === 'RB'),
-    1
-  );
-
-  addPosition(
-    'WR',
-    available.filter(p => p.position === 'WR'),
-    2
-  );
-
-  addPosition(
-    'TE',
-    available.filter(p => p.position === 'TE'),
-    1
-  );
-
-  addPosition(
-    'HC',
-    available.filter(p => p.position === 'HC'),
-    1
-  );
-
-  addPosition(
-    'K',
-    available.filter(p => p.position === 'K'),
-    1
-  );
-
-  addPosition(
-    'DL',
-    available.filter(p => p.position === 'DL'),
-    2
-  );
-
-  addPosition(
-    'LB',
-    available.filter(p => p.position === 'LB'),
-    2
-  );
-
-  addPosition(
-    'DB',
-    available.filter(p => p.position === 'DB'),
-    2
-  );
-
-  addPosition(
-    'FLEX',
-    available.filter(
-      p =>
-        p.position === 'RB' ||
-        p.position === 'WR'
-    ),
-    2
-  );
-
-  addPosition(
-    'IDP FLEX',
-    available.filter(
-      p =>
-        p.position === 'LB' ||
-        p.position === 'DB'
-    ),
-    1
-  );
-
-  const projectedPoints =
-    lineup.reduce(
-      (total, slot) =>
-        total + playerScore(slot.player),
-      0
-    );
-
-  // Current starters
-  const currentStarters = roster.filter(
-    p => p.rosterGroup === 'starter'
-  );
-
-  const recommendedIds = new Set(
-    lineup.map(slot => slot.player.id)
-  );
-
-  const currentIds = new Set(
-    currentStarters.map(player => player.id)
-  );
-
-  const playersToAdd =
-    lineup
-      .map(slot => slot.player)
-      .filter(player => !currentIds.has(player.id));
-
-  const playersToRemove =
-    currentStarters.filter(
-      player => !recommendedIds.has(player.id)
-    );
-
+  const projectedPoints = lineup.reduce((total, slot) => total + playerScore(slot.player), 0);
+  const currentStarters = roster.filter(player => player.rosterGroup === 'starter');
+  const recommendedIds = new Set(lineup.map(slot => slot.player.id));
+  const currentIds = new Set(currentStarters.map(player => player.id));
+  const playersToAdd = lineup.map(slot => slot.player).filter(player => !currentIds.has(player.id));
+  const playersToRemove = currentStarters.filter(player => !recommendedIds.has(player.id));
   const changes: LineupChange[] = [];
 
-  for (
-    let i = 0;
-    i < Math.min(
-      playersToAdd.length,
-      playersToRemove.length
-    );
-    i++
-  ) {
-
+  for (let i = 0; i < Math.min(playersToAdd.length, playersToRemove.length); i++) {
+    const add = playersToAdd[i];
+    const remove = playersToRemove[i];
+    const matchingSlot = lineup.find(slot => slot.player.id === add.id)?.slot ?? add.position;
     changes.push({
-
-      slot: playersToAdd[i].position,
-
-      add: playersToAdd[i],
-
-      remove: playersToRemove[i],
-
-      projectedGain:
-        playerScore(playersToAdd[i]) -
-        playerScore(playersToRemove[i])
-
+      slot: matchingSlot,
+      add,
+      remove,
+      projectedGain: playerScore(add) - playerScore(remove),
     });
-
   }
 
-  return {
-
-    projectedPoints,
-
-    lineup,
-
-    changes
-
-  };
-
+  return { projectedPoints, lineup, changes };
 }

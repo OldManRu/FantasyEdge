@@ -1,4 +1,5 @@
 import { collectPublicSignals } from './collectors';
+import { evaluateCompletedProjections, getEvaluationSummary } from './evaluation';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
 import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
 
@@ -62,6 +63,7 @@ async function refreshWithSignals(db: D1Database) {
   if (result.ok) {
     await collectPublicSignals(db);
     await applyActiveSignalsToStoredIntelligence(db);
+    await evaluateCompletedProjections(db);
   }
   return result;
 }
@@ -149,6 +151,11 @@ export default {
       if (!env.DB) return json({ ok: false, error: 'D1 storage is not configured.' }, { status: 503 });
       const limit = Math.max(1, Math.min(250, Number(url.searchParams.get('limit') ?? 100)));
       return json({ ok: true, signals: await latestSignals(env.DB, limit) });
+    }
+
+    if (url.pathname === '/api/evaluation/summary' && request.method === 'GET') {
+      if (!env.DB) return json({ ok: false, error: 'D1 storage is not configured.' }, { status: 503 });
+      return json({ ok: true, ...(await getEvaluationSummary(env.DB)) });
     }
 
     if (url.pathname.startsWith('/api/')) return json({ ok: false, error: 'Not found' }, { status: 404 });

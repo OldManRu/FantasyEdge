@@ -23,10 +23,14 @@ function send(type: 'FANTASY_EDGE_SYNC_ROSTER' | 'FANTASY_EDGE_SYNC_CONFIG', pay
   });
 }
 
+let lastConfigFingerprint = '';
 async function syncConfigIfPresent() {
   if (!looksLikeCommissionerSettingsPage()) return false;
   const sections = parseLeagueConfig();
   if (!sections.length) return false;
+  const fingerprint = JSON.stringify(sections);
+  if (fingerprint === lastConfigFingerprint) return false;
+  lastConfigFingerprint = fingerprint;
   const deviceId = await getDeviceId();
   send('FANTASY_EDGE_SYNC_CONFIG', {
     schemaVersion: 1,
@@ -42,8 +46,21 @@ async function syncConfigIfPresent() {
   return true;
 }
 
+function scheduleConfigRescans() {
+  const delays = [500, 1500, 3000, 6000];
+  delays.forEach(delay => window.setTimeout(() => { void syncConfigIfPresent(); }, delay));
+  let timer: number | undefined;
+  const observer = new MutationObserver(() => {
+    if (timer) window.clearTimeout(timer);
+    timer = window.setTimeout(() => { void syncConfigIfPresent(); }, 400);
+  });
+  observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'value', 'checked', 'selected'] });
+  window.setTimeout(() => observer.disconnect(), 20000);
+}
+
 async function runCollector() {
   await syncConfigIfPresent();
+  scheduleConfigRescans();
   const rosterRows = document.querySelectorAll('.player-row');
   if (!rosterRows.length) {
     console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping roster collection.`);

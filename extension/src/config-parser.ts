@@ -2,6 +2,7 @@ import type { LeagueConfigSection } from '../../shared/models/league-config';
 
 const clean = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
 const SENSITIVE = /(uid|user.?id|session|token|csrf|auth|password|passwd|secret|key)/i;
+const NOISE = /^(home|logout|log out|help|support|privacy|terms|copyright|real.?time fantasy sports)$/i;
 
 function isSensitiveControl(element: Element) {
   if (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement)) return false;
@@ -13,7 +14,6 @@ function isSensitiveControl(element: Element) {
   ].filter(Boolean).join(' ');
   if (SENSITIVE.test(haystack)) return true;
   if (element instanceof HTMLInputElement && ['password', 'hidden'].includes(element.type.toLowerCase())) {
-    // Keep harmless league identifiers, but never hidden user/session/auth metadata.
     return !/^lid$/i.test(element.name || element.id || '');
   }
   return false;
@@ -48,12 +48,20 @@ function uniqueKey(values: LeagueConfigSection['values'], desired: string) {
   return `${base} (${suffix})`;
 }
 
+function valueForCell(value: string): string | number | boolean | null {
+  const cleaned = clean(value);
+  if (/^(yes|enabled|true|on)$/i.test(cleaned)) return true;
+  if (/^(no|disabled|false|off)$/i.test(cleaned)) return false;
+  const numeric = Number(cleaned.replace(/,/g, ''));
+  return cleaned !== '' && Number.isFinite(numeric) ? numeric : cleaned || null;
+}
+
 function tableToSection(table: HTMLTableElement, tableIndex: number): LeagueConfigSection | null {
   const rows = Array.from(table.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tfoot > tr, :scope > tr'));
   if (!rows.length) return null;
 
   const rowCells = rows.map(row => Array.from(row.querySelectorAll(':scope > th, :scope > td')).map(cell => clean(cell.textContent)));
-  const headerRowIndex = rowCells.findIndex(cells => cells.length >= 2 && cells.some(Boolean) && rows[rowCells.indexOf(cells)]?.querySelector('th'));
+  const headerRowIndex = rowCells.findIndex((cells, index) => cells.length >= 2 && cells.some(Boolean) && Boolean(rows[index]?.querySelector('th')));
   const headers = headerRowIndex >= 0 ? rowCells[headerRowIndex].map((value, index) => value || `Column ${index + 1}`) : [];
   const values: LeagueConfigSection['values'] = {};
 
@@ -83,12 +91,25 @@ function tableToSection(table: HTMLTableElement, tableIndex: number): LeagueConf
   return { name: heading || `Settings table ${tableIndex + 1}`, values };
 }
 
-function valueForCell(value: string): string | number | boolean | null {
-  const cleaned = clean(value);
-  if (/^(yes|enabled|true|on)$/i.test(cleaned)) return true;
-  if (/^(no|disabled|false|off)$/i.test(cleaned)) return false;
-  const numeric = Number(cleaned.replace(/,/g, ''));
-  return cleaned !== '' && Number.isFinite(numeric) ? numeric : cleaned || null;
+function visibleTextSection(): LeagueConfigSection | null {
+  const raw = document.body?.innerText ?? '';
+  const lines = raw
+    .split(/\r?\n/)
+    .map(clean)
+    .filter(Boolean)
+    .filter(line => line.length <= 500)
+    .filter(line => !NOISE.test(line))
+    .filter(line => !SENSITIVE.test(line))
+    .filter(line => !/^LID\b/i.test(line));
+
+  const meaningful = lines.filter(line => /(scor|point|yard|touchdown|reception|pass|rush|receiv|interception|fumble|sack|tackle|assist|kick|field goal|extra point|return|starter|lineup|roster|flex|quarterback|running back|wide receiver|tight end|defensive|linebacker|head coach|coach|minimum|maximum|bonus)/i.test(line));
+  if (!meaningful.length) return null;
+
+  const values: LeagueConfigSection['values'] = {};
+  meaningful.slice(0, 400).forEach((line, index) => {
+    values[`text_${String(index + 1).padStart(3, '0')}`] = line;
+  });
+  return { name: 'Visible RTSports settings text', values };
 }
 
 export function looksLikeCommissionerSettingsPage() {
@@ -105,9 +126,14 @@ export function sanitizedPageUrl() {
 }
 
 export function relevantSettingsText() {
-  const candidates = Array.from(document.querySelectorAll('main, form, fieldset, table, .panel, .card, .section'));
-  const text = candidates.map(element => clean(element.textContent)).filter(value => value.length >= 20).join('\n');
-  return text.slice(0, 50000);
+  const visible = document.body?.innerText ?? '';
+  return visible
+    .split(/\r?\n/)
+    .map(clean)
+    .filter(Boolean)
+    .filter(line => !SENSITIVE.test(line))
+    .join('\n')
+    .slice(0, 50000);
 }
 
 export function parseLeagueConfig(): LeagueConfigSection[] {
@@ -136,7 +162,9 @@ export function parseLeagueConfig(): LeagueConfigSection[] {
     if (section) sections.push(section);
   }
 
-  // Deduplicate identical sections that can arise from nested RTSports markup.
+  const textFallback = visibleTextSection();
+  if (textFallback) sections.push(textFallback);
+
   const seen = new Set<string>();
   return sections.filter(section => {
     const fingerprint = JSON.stringify(section.values);

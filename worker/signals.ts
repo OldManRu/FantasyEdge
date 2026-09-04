@@ -120,8 +120,6 @@ export function applyPlayerSignals(
 ) {
   if (!signals.length) return { projection, confidence, reasons: [] as string[] };
 
-  // Multiple reports about the same issue should not multiply endlessly. Keep the most recent
-  // signal from each kind/source pair and cap the combined adjustment.
   const latest = new Map<string, PlayerSignal>();
   for (const signal of signals) {
     const key = `${signal.kind}:${signal.source}`;
@@ -143,6 +141,38 @@ export function applyPlayerSignals(
     confidence: Math.max(0.05, Math.min(0.95, confidence + confidenceDelta)),
     reasons,
   };
+}
+
+export async function applyActiveSignalsToStoredIntelligence(db: D1Database) {
+  await ensureSignalSchema(db);
+  const rows = await db.prepare(`SELECT player_key, projection, confidence, reasons_json
+    FROM player_intelligence`).all<Record<string, unknown>>();
+  const playerKeys = rows.results.map(row => String(row.player_key));
+  const signals = await activeSignalsForRoster(db, playerKeys);
+  const now = new Date().toISOString();
+  const updates: D1PreparedStatement[] = [];
+
+  for (const row of rows.results) {
+    const key = String(row.player_key);
+    const playerSignals = signals.get(key) ?? [];
+    if (!playerSignals.length) continue;
+
+    const baselineProjection = Number(row.projection ?? 0);
+    const baselineConfidence = Number(row.confidence ?? 0.35);
+    const adjusted = applyPlayerSignals(baselineProjection, baselineConfidence, playerSignals);
+    let reasons: string[] = [];
+    try { reasons = JSON.parse(String(row.reasons_json ?? '[]')) as string[]; } catch { reasons = []; }
+    reasons = reasons.filter(reason => !reason.startsWith('Signal: '));
+    reasons.push(...adjusted.reasons.map(reason => `Signal: ${reason}`));
+
+    updates.push(db.prepare(`UPDATE player_intelligence
+      SET projection=?, confidence=?, reasons_json=?, updated_at=?
+      WHERE player_key=?`)
+      .bind(Number(adjusted.projection.toFixed(2)), Number(adjusted.confidence.toFixed(2)), JSON.stringify(reasons), now, key));
+  }
+
+  for (let i = 0; i < updates.length; i += 80) await db.batch(updates.slice(i, i + 80));
+  return { appliedPlayers: updates.length };
 }
 
 export async function latestSignals(db: D1Database, limit = 100) {

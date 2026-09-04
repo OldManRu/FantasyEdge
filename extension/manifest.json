@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Fantasy Edge",
   "description": "RTSports sync bridge and lineup optimizer for Fantasy Edge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "action": {
     "default_title": "Fantasy Edge"
   },
@@ -23,7 +23,9 @@
         "https://rtsports.com/*"
       ],
       "js": ["dist/content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
     }
   ]
 }

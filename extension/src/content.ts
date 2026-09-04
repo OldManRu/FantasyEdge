@@ -1,5 +1,6 @@
 import { parseRoster } from './roster-parser';
 import { optimizeLineup } from '../../shared/optimizer/lineup-optimizer';
+import { looksLikeCommissionerSettingsPage, parseLeagueConfig } from './config-parser';
 
 console.clear();
 console.log('%cFantasy Edge', 'font-size:18px;font-weight:bold;color:#2563eb;');
@@ -7,115 +8,73 @@ console.log('%cFantasy Edge', 'font-size:18px;font-weight:bold;color:#2563eb;');
 async function getDeviceId(): Promise<string> {
   const existing = await chrome.storage.local.get('fantasyEdgeDeviceId');
   if (existing.fantasyEdgeDeviceId) return existing.fantasyEdgeDeviceId as string;
-
   const deviceId = crypto.randomUUID();
   await chrome.storage.local.set({ fantasyEdgeDeviceId: deviceId });
   return deviceId;
 }
 
-function playerScore(player: ReturnType<typeof parseRoster>[number]): number {
-  return player.projection ?? player.averagePoints ?? 0;
+function playerScore(player: ReturnType<typeof parseRoster>[number]): number { return player.projection ?? player.averagePoints ?? 0; }
+function currentStarterProjection(roster: ReturnType<typeof parseRoster>): number { return roster.filter(player => player.rosterGroup === 'starter').reduce((total, player) => total + playerScore(player), 0); }
+
+function send(type: 'FANTASY_EDGE_SYNC_ROSTER' | 'FANTASY_EDGE_SYNC_CONFIG', payload: unknown) {
+  chrome.runtime.sendMessage({ type, payload }, response => {
+    if (chrome.runtime.lastError) return console.warn('Fantasy Edge sync failed', chrome.runtime.lastError.message);
+    if (!response?.ok) console.warn('Fantasy Edge sync not stored yet', response);
+  });
 }
 
-function currentStarterProjection(roster: ReturnType<typeof parseRoster>): number {
-  return roster
-    .filter((player) => player.rosterGroup === 'starter')
-    .reduce((total, player) => total + playerScore(player), 0);
-}
-
-async function syncRoster(roster: ReturnType<typeof parseRoster>, optimized: ReturnType<typeof optimizeLineup>) {
-  if (!roster.length) return;
-
+async function syncConfigIfPresent() {
+  if (!looksLikeCommissionerSettingsPage()) return false;
+  const sections = parseLeagueConfig();
+  if (!sections.length) return false;
   const deviceId = await getDeviceId();
-  const fantasyTeam = roster.find((player) => player.fantasyTeam)?.fantasyTeam ?? null;
-
-  const payload = {
+  send('FANTASY_EDGE_SYNC_CONFIG', {
     schemaVersion: 1,
     source: 'rtsports',
     deviceId,
-    pageUrl: window.location.href,
+    pageUrl: location.href,
     syncedAt: new Date().toISOString(),
-    fantasyTeam,
-    roster,
-    optimized,
-  };
-
-  chrome.runtime.sendMessage(
-    { type: 'FANTASY_EDGE_SYNC_ROSTER', payload },
-    (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('Fantasy Edge sync failed', chrome.runtime.lastError.message);
-        return;
-      }
-
-      if (response?.ok) {
-        console.info(`Fantasy Edge synced ${roster.length} players.`);
-      } else {
-        console.warn('Fantasy Edge sync not stored yet', response);
-      }
-    },
-  );
+    pageTitle: document.title,
+    sections,
+    rawText: document.body?.innerText?.slice(0, 50000) ?? '',
+  });
+  console.info(`Fantasy Edge discovered ${sections.length} commissioner settings sections.`);
+  return true;
 }
 
 async function runCollector() {
+  await syncConfigIfPresent();
   const rosterRows = document.querySelectorAll('.player-row');
-
   if (!rosterRows.length) {
-    console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping collection.`);
+    console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping roster collection.`);
     return;
   }
-
   try {
     const roster = parseRoster();
     const optimized = optimizeLineup(roster);
     const currentProjectedPoints = currentStarterProjection(roster);
     const optimizedProjectedPoints = optimized.projectedPoints;
     const projectedGain = optimizedProjectedPoints - currentProjectedPoints;
-
     console.group('Fantasy Edge Summary');
     console.log('Players Parsed:', roster.length);
     console.log('Current Projection:', currentProjectedPoints.toFixed(2));
     console.log('Optimized Projection:', optimizedProjectedPoints.toFixed(2));
     console.log('Potential Gain:', projectedGain.toFixed(2));
     console.groupEnd();
-
-    console.group('Recommended Lineup');
-    console.table(
-      optimized.lineup.map((slot) => ({
-        Slot: slot.slot,
-        Player: slot.player.name,
-        Position: slot.player.position,
-        Team: slot.player.nflTeam,
-        Projection: slot.player.projection,
-        Score: slot.player.adjustedProjection ?? slot.player.projection ?? slot.player.averagePoints ?? 0,
-      })),
-    );
-    console.groupEnd();
-
-    console.group('Recommended Changes');
-    console.table(
-      optimized.changes.map((change) => ({
-        Start: change.add.name,
-        Bench: change.remove?.name ?? 'Open slot',
-        Gain: change.projectedGain.toFixed(2),
-      })),
-    );
-    console.groupEnd();
-
-    (window as any).fantasyEdge = {
+    (window as any).fantasyEdge = { roster, optimized, summary: { currentProjectedPoints, optimizedProjectedPoints, projectedGain } };
+    const deviceId = await getDeviceId();
+    send('FANTASY_EDGE_SYNC_ROSTER', {
+      schemaVersion: 1,
+      source: 'rtsports',
+      deviceId,
+      pageUrl: window.location.href,
+      syncedAt: new Date().toISOString(),
+      fantasyTeam: roster.find(player => player.fantasyTeam)?.fantasyTeam ?? null,
       roster,
       optimized,
-      summary: {
-        currentProjectedPoints,
-        optimizedProjectedPoints,
-        projectedGain,
-      },
-    };
-
-    await syncRoster(roster, optimized);
-  } catch (error) {
-    console.error('Fantasy Edge Error', error);
-  }
+    });
+    console.info(`Fantasy Edge synced ${roster.length} players.`);
+  } catch (error) { console.error('Fantasy Edge Error', error); }
 }
 
 void runCollector();

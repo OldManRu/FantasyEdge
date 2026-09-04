@@ -2,6 +2,7 @@ import { collectPublicSignals } from './collectors';
 import { evaluateCompletedProjections, getEvaluationSummary } from './evaluation';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
 import { getLatestLeagueRules, persistNormalizedLeagueRules } from './league-config';
+import { getOptimizedLineup } from './optimizer';
 import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
 
 export interface Env { ASSETS: Fetcher; DB?: D1Database; }
@@ -35,6 +36,7 @@ export default {
    if(!env.DB)return json({ok:true,config:null,storage:'not-configured'});await ensureSchema(env.DB);const row=await env.DB.prepare(`SELECT id,page_url,page_title,league_name,season,synced_at,received_at,section_count,config_json FROM league_config_syncs ORDER BY id DESC LIMIT 1`).first<Record<string,unknown>>();return json({ok:true,storage:'d1',config:row?{id:row.id,pageUrl:row.page_url,pageTitle:row.page_title,leagueName:row.league_name,season:row.season,syncedAt:row.synced_at,receivedAt:row.received_at,sectionCount:row.section_count,sections:JSON.parse(String(row.config_json??'[]'))}:null});
   }
   if(url.pathname==='/api/config/rules'&&request.method==='GET'){if(!env.DB)return json({ok:true,configSyncId:null,rules:[]});await ensureSchema(env.DB);return json({ok:true,...(await getLatestLeagueRules(env.DB))});}
+  if(url.pathname==='/api/lineup/recommendation'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});await ensureSchema(env.DB);return json({ok:true,...(await getOptimizedLineup(env.DB))});}
   if(url.pathname==='/api/intelligence/latest'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});return json({ok:true,...(await getLatestIntelligence(env.DB))});}
   if(url.pathname==='/api/signals/latest'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});const limit=Math.max(1,Math.min(250,Number(url.searchParams.get('limit')??100)));return json({ok:true,signals:await latestSignals(env.DB,limit)});}
   if(url.pathname==='/api/evaluation/summary'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});return json({ok:true,...(await getEvaluationSummary(env.DB))});}

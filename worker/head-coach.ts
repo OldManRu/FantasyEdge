@@ -76,6 +76,7 @@ function nextGame(rows: ScheduleRow[], team: string) {
     .filter(row => String(row.season) === '2026')
     .filter(isRegular)
     .filter(row => row.home_team === team || row.away_team === team)
+    .filter(row => !completed(row))
     .filter(row => gameDate(row) >= today)
     .sort((a, b) => gameDate(a).localeCompare(gameDate(b)))[0];
 }
@@ -112,8 +113,6 @@ export function projectHeadCoach(team: string, schedule: ScheduleRow[]): HeadCoa
   const lossPoints = isHome ? amdFflScoring.headCoach.homeLoss : amdFflScoring.headCoach.roadLoss;
   const tiePoints = isHome ? amdFflScoring.headCoach.homeTie : amdFflScoring.headCoach.roadTie;
 
-  // Conditional winning margin keeps underdogs from receiving a negative MOV bonus while
-  // still allowing stronger favorites to earn more expected AMD FFL coach points.
   const conditionalWinMargin = 6 + Math.abs(expectedMargin) * 0.35;
   const expectedMovBonus = effectiveWinProbability * conditionalWinMargin * amdFflScoring.headCoach.marginOfVictory;
   const projection =
@@ -124,7 +123,7 @@ export function projectHeadCoach(team: string, schedule: ScheduleRow[]): HeadCoa
 
   const sample = Math.min(teamStrength.sample, opponentStrength.sample);
   let confidence = sample >= 8 ? 0.72 : sample >= 5 ? 0.62 : sample >= 2 ? 0.5 : 0.38;
-  if (String(game.season) === '2026') confidence += 0.03;
+  confidence += 0.03;
 
   reasons.push(`${team} is ${isHome ? 'home' : 'away'} against ${opponent}${gameDate(game) ? ` on ${gameDate(game)}` : ''}.`);
   if (teamStrength.sample) reasons.push(`${team}'s recent weighted point differential is ${teamStrength.margin >= 0 ? '+' : ''}${teamStrength.margin.toFixed(1)} across ${teamStrength.sample} games.`);

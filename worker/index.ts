@@ -1,3 +1,5 @@
+import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
+
 export interface Env {
   ASSETS: Fetcher;
   DB?: D1Database;
@@ -45,8 +47,16 @@ async function ensureSchema(db: D1Database) {
   ]);
 }
 
+async function intelligenceIsStale(db: D1Database) {
+  await ensureIntelligenceSchema(db);
+  const row = await db.prepare(`SELECT completed_at FROM intelligence_runs WHERE status='success' ORDER BY id DESC LIMIT 1`).first<{ completed_at: string }>();
+  if (!row?.completed_at) return true;
+  const age = Date.now() - new Date(row.completed_at).getTime();
+  return !Number.isFinite(age) || age > 4 * 60 * 60 * 1000;
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === '/api/health') {
@@ -55,13 +65,12 @@ export default {
         service: 'fantasy-edge',
         platform: 'cloudflare-workers',
         storage: env.DB ? 'd1' : 'not-configured',
+        intelligence: env.DB ? 'enabled' : 'not-configured',
       });
     }
 
     if (url.pathname === '/api/sync/roster' && request.method === 'POST') {
-      if (!env.DB) {
-        return json({ ok: false, error: 'D1 storage is not configured yet.' }, { status: 503 });
-      }
+      if (!env.DB) return json({ ok: false, error: 'D1 storage is not configured yet.' }, { status: 503 });
 
       const payload = (await request.json().catch(() => null)) as SyncPayload | null;
       if (!payload?.deviceId || !payload?.syncedAt || !Array.isArray(payload.roster)) {
@@ -69,44 +78,39 @@ export default {
       }
 
       await ensureSchema(env.DB);
-
       await env.DB.prepare(
         `INSERT INTO roster_syncs
           (device_id, source, page_url, fantasy_team, synced_at, player_count, roster_json, optimized_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(
-          payload.deviceId,
-          payload.source ?? 'rtsports',
-          payload.pageUrl ?? null,
-          payload.fantasyTeam ?? null,
-          payload.syncedAt,
-          payload.roster.length,
-          JSON.stringify(payload.roster),
-          payload.optimized ? JSON.stringify(payload.optimized) : null,
-        )
-        .run();
+      ).bind(
+        payload.deviceId,
+        payload.source ?? 'rtsports',
+        payload.pageUrl ?? null,
+        payload.fantasyTeam ?? null,
+        payload.syncedAt,
+        payload.roster.length,
+        JSON.stringify(payload.roster),
+        payload.optimized ? JSON.stringify(payload.optimized) : null,
+      ).run();
+
+      if (await intelligenceIsStale(env.DB)) {
+        ctx.waitUntil(refreshIntelligence({ DB: env.DB }));
+      }
 
       return json({ ok: true, playerCount: payload.roster.length, syncedAt: payload.syncedAt });
     }
 
     if (url.pathname === '/api/sync/latest' && request.method === 'GET') {
-      if (!env.DB) {
-        return json({ ok: true, sync: null, storage: 'not-configured' });
-      }
-
+      if (!env.DB) return json({ ok: true, sync: null, storage: 'not-configured' });
       await ensureSchema(env.DB);
 
       const row = await env.DB.prepare(
         `SELECT id, device_id, source, page_url, fantasy_team, synced_at, received_at,
                 player_count, roster_json, optimized_json
-         FROM roster_syncs
-         ORDER BY id DESC
-         LIMIT 1`,
+         FROM roster_syncs ORDER BY id DESC LIMIT 1`,
       ).first<Record<string, unknown>>();
 
       if (!row) return json({ ok: true, sync: null, storage: 'd1' });
-
       return json({
         ok: true,
         storage: 'd1',
@@ -125,10 +129,17 @@ export default {
       });
     }
 
-    if (url.pathname.startsWith('/api/')) {
-      return json({ ok: false, error: 'Not found' }, { status: 404 });
+    if (url.pathname === '/api/intelligence/latest' && request.method === 'GET') {
+      if (!env.DB) return json({ ok: false, error: 'D1 storage is not configured.' }, { status: 503 });
+      return json({ ok: true, ...(await getLatestIntelligence(env.DB)) });
     }
 
+    if (url.pathname.startsWith('/api/')) return json({ ok: false, error: 'Not found' }, { status: 404 });
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (!env.DB) return;
+    ctx.waitUntil(refreshIntelligence({ DB: env.DB }));
   },
 } satisfies ExportedHandler<Env>;

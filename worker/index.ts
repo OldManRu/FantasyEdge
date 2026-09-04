@@ -1,3 +1,4 @@
+import { collectPublicSignals } from './collectors';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
 import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
 
@@ -58,7 +59,10 @@ async function intelligenceIsStale(db: D1Database) {
 
 async function refreshWithSignals(db: D1Database) {
   const result = await refreshIntelligence({ DB: db });
-  if (result.ok) await applyActiveSignalsToStoredIntelligence(db);
+  if (result.ok) {
+    await collectPublicSignals(db);
+    await applyActiveSignalsToStoredIntelligence(db);
+  }
   return result;
 }
 

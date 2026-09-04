@@ -1,5 +1,6 @@
 import { collectPublicSignals } from './collectors';
 import { evaluateCompletedProjections, getEvaluationSummary } from './evaluation';
+import { applyHeadCoachProjections } from './head-coach-refresh';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
 import { getLatestLeagueRules, persistNormalizedLeagueRules } from './league-config';
 import { getOptimizedLineup } from './optimizer';
@@ -18,7 +19,7 @@ async function ensureSchema(db:D1Database){await db.batch([
  db.prepare(`CREATE INDEX IF NOT EXISTS idx_league_config_received ON league_config_syncs(received_at DESC)`)
 ]);}
 async function intelligenceIsStale(db:D1Database){await ensureIntelligenceSchema(db);const row=await db.prepare(`SELECT completed_at FROM intelligence_runs WHERE status='success' ORDER BY id DESC LIMIT 1`).first<{completed_at:string}>();if(!row?.completed_at)return true;const age=Date.now()-new Date(row.completed_at).getTime();return !Number.isFinite(age)||age>4*60*60*1000;}
-async function refreshWithSignals(db:D1Database){const result=await refreshIntelligence({DB:db});if(result.ok){await collectPublicSignals(db);await applyActiveSignalsToStoredIntelligence(db);await evaluateCompletedProjections(db);}return result;}
+async function refreshWithSignals(db:D1Database){const result=await refreshIntelligence({DB:db});if(result.ok){await applyHeadCoachProjections(db,result.runId);await collectPublicSignals(db);await applyActiveSignalsToStoredIntelligence(db);await evaluateCompletedProjections(db);}return result;}
 
 export default {
  async fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Response>{const url=new URL(request.url);

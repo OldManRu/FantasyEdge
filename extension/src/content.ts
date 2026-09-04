@@ -24,10 +24,7 @@ function currentStarterProjection(roster: ReturnType<typeof parseRoster>): numbe
 }
 
 async function syncRoster(roster: ReturnType<typeof parseRoster>, optimized: ReturnType<typeof optimizeLineup>) {
-  if (!roster.length) {
-    console.warn('Fantasy Edge found no RTSports roster rows on this page.');
-    return;
-  }
+  if (!roster.length) return;
 
   const deviceId = await getDeviceId();
   const fantasyTeam = roster.find((player) => player.fantasyTeam)?.fantasyTeam ?? null;
@@ -60,54 +57,65 @@ async function syncRoster(roster: ReturnType<typeof parseRoster>, optimized: Ret
   );
 }
 
-try {
-  const roster = parseRoster();
-  const optimized = optimizeLineup(roster);
-  const currentProjectedPoints = currentStarterProjection(roster);
-  const optimizedProjectedPoints = optimized.projectedPoints;
-  const projectedGain = optimizedProjectedPoints - currentProjectedPoints;
+async function runCollector() {
+  const rosterRows = document.querySelectorAll('.player-row');
 
-  console.group('Fantasy Edge Summary');
-  console.log('Players Parsed:', roster.length);
-  console.log('Current Projection:', currentProjectedPoints.toFixed(2));
-  console.log('Optimized Projection:', optimizedProjectedPoints.toFixed(2));
-  console.log('Potential Gain:', projectedGain.toFixed(2));
-  console.groupEnd();
+  if (!rosterRows.length) {
+    console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping collection.`);
+    return;
+  }
 
-  console.group('Recommended Lineup');
-  console.table(
-    optimized.lineup.map((slot) => ({
-      Slot: slot.slot,
-      Player: slot.player.name,
-      Position: slot.player.position,
-      Team: slot.player.nflTeam,
-      Projection: slot.player.projection,
-      Score: slot.player.adjustedProjection ?? slot.player.projection ?? slot.player.averagePoints ?? 0,
-    })),
-  );
-  console.groupEnd();
+  try {
+    const roster = parseRoster();
+    const optimized = optimizeLineup(roster);
+    const currentProjectedPoints = currentStarterProjection(roster);
+    const optimizedProjectedPoints = optimized.projectedPoints;
+    const projectedGain = optimizedProjectedPoints - currentProjectedPoints;
 
-  console.group('Recommended Changes');
-  console.table(
-    optimized.changes.map((change) => ({
-      Start: change.add.name,
-      Bench: change.remove?.name ?? 'Open slot',
-      Gain: change.projectedGain.toFixed(2),
-    })),
-  );
-  console.groupEnd();
+    console.group('Fantasy Edge Summary');
+    console.log('Players Parsed:', roster.length);
+    console.log('Current Projection:', currentProjectedPoints.toFixed(2));
+    console.log('Optimized Projection:', optimizedProjectedPoints.toFixed(2));
+    console.log('Potential Gain:', projectedGain.toFixed(2));
+    console.groupEnd();
 
-  (window as any).fantasyEdge = {
-    roster,
-    optimized,
-    summary: {
-      currentProjectedPoints,
-      optimizedProjectedPoints,
-      projectedGain,
-    },
-  };
+    console.group('Recommended Lineup');
+    console.table(
+      optimized.lineup.map((slot) => ({
+        Slot: slot.slot,
+        Player: slot.player.name,
+        Position: slot.player.position,
+        Team: slot.player.nflTeam,
+        Projection: slot.player.projection,
+        Score: slot.player.adjustedProjection ?? slot.player.projection ?? slot.player.averagePoints ?? 0,
+      })),
+    );
+    console.groupEnd();
 
-  void syncRoster(roster, optimized);
-} catch (error) {
-  console.error('Fantasy Edge Error', error);
+    console.group('Recommended Changes');
+    console.table(
+      optimized.changes.map((change) => ({
+        Start: change.add.name,
+        Bench: change.remove?.name ?? 'Open slot',
+        Gain: change.projectedGain.toFixed(2),
+      })),
+    );
+    console.groupEnd();
+
+    (window as any).fantasyEdge = {
+      roster,
+      optimized,
+      summary: {
+        currentProjectedPoints,
+        optimizedProjectedPoints,
+        projectedGain,
+      },
+    };
+
+    await syncRoster(roster, optimized);
+  } catch (error) {
+    console.error('Fantasy Edge Error', error);
+  }
 }
+
+void runCollector();

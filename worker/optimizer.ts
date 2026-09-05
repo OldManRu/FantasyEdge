@@ -12,6 +12,14 @@ type RosterPlayer = {
 type SlotRule = { slot: string; count: number; eligiblePositions: string[] };
 type Candidate = { player: RosterPlayer; score: number; confidence: number; reasons: string[]; playerKey: string };
 
+type LineupItem = {
+  slot: string;
+  player: RosterPlayer;
+  score: number;
+  confidence: number;
+  reasons: string[];
+};
+
 const DEFAULT_RULES: SlotRule[] = [
   { slot: 'QB', count: 1, eligiblePositions: ['QB'] },
   { slot: 'RB', count: 1, eligiblePositions: ['RB'] },
@@ -27,6 +35,7 @@ const DEFAULT_RULES: SlotRule[] = [
 ];
 
 const normalizeName = (value = '') => value.toLowerCase().replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '').replace(/[^a-z0-9]/g, '');
+const normalizeSlot = (value = '') => value.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 const playerKey = (name = '', position = '') => `${normalizeName(name)}:${position.toUpperCase()}`;
 const unavailable = (player: RosterPlayer) => player.rosterGroup === 'ir' || /^(IR|O)$/i.test(player.injury ?? '');
 
@@ -75,6 +84,80 @@ async function deriveRules(db: D1Database): Promise<{ rules: SlotRule[]; source:
   return bySlot.size ? { rules: [...bySlot.values()], source: 'imported' } : { rules: DEFAULT_RULES, source: 'fallback' };
 }
 
+function scoreFor(player: RosterPlayer, intel: Map<string, Record<string, unknown>>) {
+  const modeled = intel.get(playerKey(player.name, player.position));
+  return modeled?.projection !== null && modeled?.projection !== undefined
+    ? Number(modeled.projection)
+    : Number(player.projection ?? player.averagePoints ?? 0);
+}
+
+function ruleForSlot(slot: string, rules: SlotRule[]) {
+  const normalized = normalizeSlot(slot);
+  return rules.find(rule => normalizeSlot(rule.slot) === normalized);
+}
+
+function slotLooksLike(player: RosterPlayer, slot: string) {
+  const current = normalizeSlot(player.lineupSlot ?? '');
+  const target = normalizeSlot(slot);
+  if (!current || !target) return false;
+  if (current === target) return true;
+  if (target === 'FLEX') return current.includes('FLEX') && !current.includes('IDP');
+  if (target === 'IDP FLEX') return current.includes('FLEX') && (current.includes('IDP') || current.includes('DEF'));
+  return current.startsWith(target);
+}
+
+function buildLegalChanges(
+  starts: LineupItem[],
+  benchedStarters: RosterPlayer[],
+  rules: SlotRule[],
+  intel: Map<string, Record<string, unknown>>,
+) {
+  const remaining = [...benchedStarters];
+  const changes: Array<{
+    start: RosterPlayer;
+    bench: RosterPlayer | null;
+    slot: string;
+    projectedGain: number | null;
+    confidence: number;
+  }> = [];
+
+  for (const start of starts) {
+    const rule = ruleForSlot(start.slot, rules);
+    if (!rule) continue;
+    const eligible = new Set(rule.eligiblePositions.map(position => position.toUpperCase()));
+
+    const legal = remaining.filter(player => eligible.has((player.position ?? '').toUpperCase()));
+    if (!legal.length) {
+      // Do not publish an impossible START/BENCH recommendation. An open-slot move is
+      // only valid when there truly is no displaced starter eligible for this slot.
+      changes.push({
+        start: start.player,
+        bench: null,
+        slot: start.slot,
+        projectedGain: null,
+        confidence: start.confidence,
+      });
+      continue;
+    }
+
+    const sameSlot = legal.filter(player => slotLooksLike(player, start.slot));
+    const pool = sameSlot.length ? sameSlot : legal;
+    const bench = [...pool].sort((a, b) => scoreFor(a, intel) - scoreFor(b, intel))[0];
+    const benchIndex = remaining.findIndex(player => playerKey(player.name, player.position) === playerKey(bench.name, bench.position));
+    if (benchIndex >= 0) remaining.splice(benchIndex, 1);
+
+    changes.push({
+      start: start.player,
+      bench,
+      slot: start.slot,
+      projectedGain: Number((start.score - scoreFor(bench, intel)).toFixed(2)),
+      confidence: start.confidence,
+    });
+  }
+
+  return changes;
+}
+
 export async function getOptimizedLineup(db: D1Database) {
   const rosterRow = await db.prepare(`SELECT roster_json,synced_at FROM roster_syncs ORDER BY id DESC LIMIT 1`).first<{ roster_json: string; synced_at: string }>();
   if (!rosterRow?.roster_json) return { available: false, reason: 'No synchronized roster.' };
@@ -89,23 +172,22 @@ export async function getOptimizedLineup(db: D1Database) {
   });
   const { rules, source } = await deriveRules(db);
   const used = new Set<string>();
-  const lineup: Array<{ slot: string; player: RosterPlayer; score: number; confidence: number; reasons: string[] }> = [];
+  const lineup: LineupItem[] = [];
   for (const rule of rules) {
     const eligible = new Set(rule.eligiblePositions.map(position => position.toUpperCase()));
     const selected = candidates.filter(candidate => eligible.has((candidate.player.position ?? '').toUpperCase()) && !used.has(candidate.playerKey)).sort((a,b) => b.score-a.score).slice(0, rule.count);
-    for (const candidate of selected) { used.add(candidate.playerKey); lineup.push({ slot: rule.slot, player: candidate.player, score: candidate.score, confidence: candidate.confidence, reasons: candidate.reasons }); }
+    for (const candidate of selected) {
+      used.add(candidate.playerKey);
+      lineup.push({ slot: rule.slot, player: candidate.player, score: candidate.score, confidence: candidate.confidence, reasons: candidate.reasons });
+    }
   }
+
   const current = new Set(roster.filter(player => player.rosterGroup === 'starter').map(player => playerKey(player.name, player.position)));
   const recommended = new Set(lineup.map(item => playerKey(item.player.name, item.player.position)));
   const starts = lineup.filter(item => !current.has(playerKey(item.player.name, item.player.position)));
-  const benches = roster.filter(player => player.rosterGroup === 'starter' && !recommended.has(playerKey(player.name, player.position)));
-  const changes = starts.map((start, index) => ({
-    start: start.player,
-    bench: benches[index] ?? null,
-    slot: start.slot,
-    projectedGain: benches[index] ? Number((start.score - (intel.get(playerKey(benches[index].name, benches[index].position))?.projection as number ?? benches[index].projection ?? benches[index].averagePoints ?? 0)).toFixed(2)) : null,
-    confidence: start.confidence,
-  }));
+  const benchedStarters = roster.filter(player => player.rosterGroup === 'starter' && !recommended.has(playerKey(player.name, player.position)));
+  const changes = buildLegalChanges(starts, benchedStarters, rules, intel);
+
   return {
     available: true,
     rulesSource: source,

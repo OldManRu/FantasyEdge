@@ -11,7 +11,7 @@ export interface Env { ASSETS: Fetcher; DB?: D1Database; }
 type SyncPayload = { schemaVersion?:number; source?:string; deviceId?:string; pageUrl?:string; syncedAt?:string; fantasyTeam?:string|null; roster?:unknown[]; optimized?:unknown };
 type ConfigPayload = { schemaVersion?:number; source?:string; deviceId?:string; pageUrl?:string; syncedAt?:string; pageTitle?:string|null; leagueName?:string|null; season?:number|null; sections?:Array<{name?:string;values?:Record<string,unknown>}>; rawText?:string };
 const json=(body:unknown,init:ResponseInit={})=>new Response(JSON.stringify(body,null,2),{...init,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...(init.headers??{})}});
-const EXPECTED_MODEL_VERSION='fe-2026.4';
+const EXPECTED_MODEL_VERSION='fe-2026.5';
 const EXPECTED_SCORING_VERSION='amdffl-2026.1';
 const EXPECTED_HC_MODEL_VERSION='fe-hc-2026.1';
 const RUNNING_GRACE_MS=2*60*1000;

@@ -1,6 +1,7 @@
 import { collectPublicSignals } from './collectors';
 import { evaluateCompletedProjections, getEvaluationSummary } from './evaluation';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
+import { refreshIntelligenceFast } from './intelligence-fast';
 import { getLatestLeagueRules, persistNormalizedLeagueRules } from './league-config';
 import { getOptimizedLineup } from './optimizer';
 import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
@@ -44,21 +45,21 @@ async function intelligenceRefreshRunning(db:D1Database){
  return false;
 }
 
-async function queueRefreshIfNeeded(db:D1Database,ctx:ExecutionContext){
- const stale=await intelligenceIsStale(db);
- if(!stale)return false;
+async function refreshWithSignals(db:D1Database){const result=await refreshIntelligence({DB:db});if(result.ok){await applyHeadCoachProjections(db,result.runId);await collectPublicSignals(db);await applyActiveSignalsToStoredIntelligence(db);await evaluateCompletedProjections(db);}return result;}
+async function refreshInteractive(db:D1Database){const result=await refreshIntelligenceFast({DB:db});if(result.ok){await applyHeadCoachProjections(db,result.runId);await applyActiveSignalsToStoredIntelligence(db);}return result;}
+
+async function queueInteractiveRefreshIfNeeded(db:D1Database,ctx:ExecutionContext){
+ if(!(await intelligenceIsStale(db)))return false;
  if(await intelligenceRefreshRunning(db))return true;
- ctx.waitUntil(refreshWithSignals(db));
+ ctx.waitUntil(refreshInteractive(db));
  return true;
 }
-
-async function refreshWithSignals(db:D1Database){const result=await refreshIntelligence({DB:db});if(result.ok){await applyHeadCoachProjections(db,result.runId);await collectPublicSignals(db);await applyActiveSignalsToStoredIntelligence(db);await evaluateCompletedProjections(db);}return result;}
 
 export default {
  async fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Response>{const url=new URL(request.url);
   if(url.pathname==='/api/health')return json({ok:true,service:'fantasy-edge',platform:'cloudflare-workers',storage:env.DB?'d1':'not-configured',intelligence:env.DB?'enabled':'not-configured'});
   if(url.pathname==='/api/sync/roster'&&request.method==='POST'){
-   if(!env.DB)return json({ok:false,error:'D1 storage is not configured yet.'},{status:503});const payload=(await request.json().catch(()=>null)) as SyncPayload|null;if(!payload?.deviceId||!payload?.syncedAt||!Array.isArray(payload.roster))return json({ok:false,error:'Invalid sync payload.'},{status:400});await ensureSchema(env.DB);await env.DB.prepare(`INSERT INTO roster_syncs (device_id,source,page_url,fantasy_team,synced_at,player_count,roster_json,optimized_json) VALUES (?,?,?,?,?,?,?,?)`).bind(payload.deviceId,payload.source??'rtsports',payload.pageUrl??null,payload.fantasyTeam??null,payload.syncedAt,payload.roster.length,JSON.stringify(payload.roster),payload.optimized?JSON.stringify(payload.optimized):null).run();await queueRefreshIfNeeded(env.DB,ctx);return json({ok:true,playerCount:payload.roster.length,syncedAt:payload.syncedAt});
+   if(!env.DB)return json({ok:false,error:'D1 storage is not configured yet.'},{status:503});const payload=(await request.json().catch(()=>null)) as SyncPayload|null;if(!payload?.deviceId||!payload?.syncedAt||!Array.isArray(payload.roster))return json({ok:false,error:'Invalid sync payload.'},{status:400});await ensureSchema(env.DB);await env.DB.prepare(`INSERT INTO roster_syncs (device_id,source,page_url,fantasy_team,synced_at,player_count,roster_json,optimized_json) VALUES (?,?,?,?,?,?,?,?)`).bind(payload.deviceId,payload.source??'rtsports',payload.pageUrl??null,payload.fantasyTeam??null,payload.syncedAt,payload.roster.length,JSON.stringify(payload.roster),payload.optimized?JSON.stringify(payload.optimized):null).run();await queueInteractiveRefreshIfNeeded(env.DB,ctx);return json({ok:true,playerCount:payload.roster.length,syncedAt:payload.syncedAt});
   }
   if(url.pathname==='/api/sync/config'&&request.method==='POST'){
    if(!env.DB)return json({ok:false,error:'D1 storage is not configured yet.'},{status:503});const payload=(await request.json().catch(()=>null)) as ConfigPayload|null;if(!payload?.deviceId||!payload?.syncedAt||!Array.isArray(payload.sections)||!payload.sections.length)return json({ok:false,error:'Invalid league configuration payload.'},{status:400});await ensureSchema(env.DB);const result=await env.DB.prepare(`INSERT INTO league_config_syncs (device_id,source,page_url,page_title,league_name,season,synced_at,section_count,config_json,raw_text) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(payload.deviceId,payload.source??'rtsports',payload.pageUrl??null,payload.pageTitle??null,payload.leagueName??null,payload.season??null,payload.syncedAt,payload.sections.length,JSON.stringify(payload.sections),payload.rawText?.slice(0,50000)??null).run();const configId=Number(result.meta.last_row_id??0);const normalized=await persistNormalizedLeagueRules(env.DB,configId,payload.sections);return json({ok:true,configId,sectionCount:payload.sections.length,normalizedRuleCount:normalized.count,categories:normalized.categories,message:'League configuration stored and normalized.'});
@@ -73,8 +74,10 @@ export default {
   if(url.pathname==='/api/lineup/recommendation'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});await ensureSchema(env.DB);return json({ok:true,...(await getOptimizedLineup(env.DB))});}
   if(url.pathname==='/api/intelligence/latest'&&request.method==='GET'){
    if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});
-   const refreshing=await queueRefreshIfNeeded(env.DB,ctx);
-   return json({ok:true,refreshing,...(await getLatestIntelligence(env.DB))});
+   const stale=await intelligenceIsStale(env.DB);
+   const running=stale?await intelligenceRefreshRunning(env.DB):false;
+   if(stale&&!running)await refreshInteractive(env.DB);
+   return json({ok:true,refreshing:stale&&running,...(await getLatestIntelligence(env.DB))});
   }
   if(url.pathname==='/api/signals/latest'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});const limit=Math.max(1,Math.min(250,Number(url.searchParams.get('limit')??100)));return json({ok:true,signals:await latestSignals(env.DB,limit)});}
   if(url.pathname==='/api/evaluation/summary'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});return json({ok:true,...(await getEvaluationSummary(env.DB))});}

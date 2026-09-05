@@ -20,6 +20,6 @@ export const DEFAULT_LINEUP_RULES: LeagueLineupRules = {
     { slot: 'LB', count: 2, eligiblePositions: ['LB'] },
     { slot: 'DB', count: 2, eligiblePositions: ['DB'] },
     { slot: 'FLEX', count: 2, eligiblePositions: ['RB', 'WR'] },
-    { slot: 'IDP FLEX', count: 1, eligiblePositions: ['LB', 'DB'] },
+    { slot: 'IDP FLEX', count: 1, eligiblePositions: ['DL', 'LB', 'DB'] },
   ],
 };

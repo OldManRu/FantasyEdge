@@ -1,15 +1,18 @@
 import { collectPublicSignals } from './collectors';
 import { evaluateCompletedProjections, getEvaluationSummary } from './evaluation';
-import { applyHeadCoachProjections } from './head-coach-refresh';
 import { ensureIntelligenceSchema, getLatestIntelligence, refreshIntelligence } from './intelligence';
 import { getLatestLeagueRules, persistNormalizedLeagueRules } from './league-config';
 import { getOptimizedLineup } from './optimizer';
 import { applyActiveSignalsToStoredIntelligence, latestSignals } from './signals';
+import { applyHeadCoachProjections } from './head-coach-refresh';
 
 export interface Env { ASSETS: Fetcher; DB?: D1Database; }
 type SyncPayload = { schemaVersion?:number; source?:string; deviceId?:string; pageUrl?:string; syncedAt?:string; fantasyTeam?:string|null; roster?:unknown[]; optimized?:unknown };
 type ConfigPayload = { schemaVersion?:number; source?:string; deviceId?:string; pageUrl?:string; syncedAt?:string; pageTitle?:string|null; leagueName?:string|null; season?:number|null; sections?:Array<{name?:string;values?:Record<string,unknown>}>; rawText?:string };
 const json=(body:unknown,init:ResponseInit={})=>new Response(JSON.stringify(body,null,2),{...init,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...(init.headers??{})}});
+const EXPECTED_MODEL_VERSION='fe-2026.4';
+const EXPECTED_SCORING_VERSION='amdffl-2026.1';
+const EXPECTED_HC_MODEL_VERSION='fe-hc-2026.1';
 
 async function ensureSchema(db:D1Database){await db.batch([
  db.prepare(`CREATE TABLE IF NOT EXISTS roster_syncs (id INTEGER PRIMARY KEY AUTOINCREMENT,device_id TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'rtsports',page_url TEXT,fantasy_team TEXT,synced_at TEXT NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,player_count INTEGER NOT NULL,roster_json TEXT NOT NULL,optimized_json TEXT)`),
@@ -18,7 +21,16 @@ async function ensureSchema(db:D1Database){await db.batch([
  db.prepare(`CREATE TABLE IF NOT EXISTS league_config_syncs (id INTEGER PRIMARY KEY AUTOINCREMENT,device_id TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'rtsports',page_url TEXT,page_title TEXT,league_name TEXT,season INTEGER,synced_at TEXT NOT NULL,received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,section_count INTEGER NOT NULL,config_json TEXT NOT NULL,raw_text TEXT)`),
  db.prepare(`CREATE INDEX IF NOT EXISTS idx_league_config_received ON league_config_syncs(received_at DESC)`)
 ]);}
-async function intelligenceIsStale(db:D1Database){await ensureIntelligenceSchema(db);const row=await db.prepare(`SELECT completed_at FROM intelligence_runs WHERE status='success' ORDER BY id DESC LIMIT 1`).first<{completed_at:string}>();if(!row?.completed_at)return true;const age=Date.now()-new Date(row.completed_at).getTime();return !Number.isFinite(age)||age>4*60*60*1000;}
+async function intelligenceIsStale(db:D1Database){
+ await ensureIntelligenceSchema(db);
+ const row=await db.prepare(`SELECT completed_at,source_summary FROM intelligence_runs WHERE status='success' ORDER BY id DESC LIMIT 1`).first<{completed_at:string;source_summary:string|null}>();
+ if(!row?.completed_at)return true;
+ const age=Date.now()-new Date(row.completed_at).getTime();
+ if(!Number.isFinite(age)||age>4*60*60*1000)return true;
+ let summary:Record<string,unknown>={};
+ try{summary=row.source_summary?JSON.parse(row.source_summary) as Record<string,unknown>:{};}catch{summary={};}
+ return summary.modelVersion!==EXPECTED_MODEL_VERSION||summary.scoringVersion!==EXPECTED_SCORING_VERSION||summary.hcModelVersion!==EXPECTED_HC_MODEL_VERSION;
+}
 async function refreshWithSignals(db:D1Database){const result=await refreshIntelligence({DB:db});if(result.ok){await applyHeadCoachProjections(db,result.runId);await collectPublicSignals(db);await applyActiveSignalsToStoredIntelligence(db);await evaluateCompletedProjections(db);}return result;}
 
 export default {
@@ -38,7 +50,12 @@ export default {
   }
   if(url.pathname==='/api/config/rules'&&request.method==='GET'){if(!env.DB)return json({ok:true,configSyncId:null,rules:[]});await ensureSchema(env.DB);return json({ok:true,...(await getLatestLeagueRules(env.DB))});}
   if(url.pathname==='/api/lineup/recommendation'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});await ensureSchema(env.DB);return json({ok:true,...(await getOptimizedLineup(env.DB))});}
-  if(url.pathname==='/api/intelligence/latest'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});return json({ok:true,...(await getLatestIntelligence(env.DB))});}
+  if(url.pathname==='/api/intelligence/latest'&&request.method==='GET'){
+   if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});
+   const refreshing=await intelligenceIsStale(env.DB);
+   if(refreshing)ctx.waitUntil(refreshWithSignals(env.DB));
+   return json({ok:true,refreshing,...(await getLatestIntelligence(env.DB))});
+  }
   if(url.pathname==='/api/signals/latest'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});const limit=Math.max(1,Math.min(250,Number(url.searchParams.get('limit')??100)));return json({ok:true,signals:await latestSignals(env.DB,limit)});}
   if(url.pathname==='/api/evaluation/summary'&&request.method==='GET'){if(!env.DB)return json({ok:false,error:'D1 storage is not configured.'},{status:503});return json({ok:true,...(await getEvaluationSummary(env.DB))});}
   if(url.pathname.startsWith('/api/'))return json({ok:false,error:'Not found'},{status:404});return env.ASSETS.fetch(request);

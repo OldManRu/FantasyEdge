@@ -58,26 +58,44 @@ function scheduleConfigRescans() {
   window.setTimeout(() => observer.disconnect(), 20000);
 }
 
-async function runCollector() {
-  await syncConfigIfPresent();
-  scheduleConfigRescans();
+let lastRosterFingerprint = '';
+let rosterSyncInFlight = false;
+
+function rosterFingerprint(roster: ReturnType<typeof parseRoster>) {
+  return JSON.stringify(roster.map(player => ({
+    id: player.id,
+    name: player.name,
+    rosterGroup: player.rosterGroup,
+    lineupSlot: player.lineupSlot,
+    position: player.position,
+    nflTeam: player.nflTeam,
+    injury: player.injury,
+  })));
+}
+
+async function syncRosterIfPresent(force = false) {
+  if (rosterSyncInFlight) return false;
   const rosterRows = document.querySelectorAll('.player-row');
-  if (!rosterRows.length) {
-    console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping roster collection.`);
-    return;
-  }
+  if (!rosterRows.length) return false;
+
   try {
+    rosterSyncInFlight = true;
     const roster = parseRoster();
+    const fingerprint = rosterFingerprint(roster);
+    if (!force && fingerprint === lastRosterFingerprint) return false;
+
     const optimized = optimizeLineup(roster);
     const currentProjectedPoints = currentStarterProjection(roster);
     const optimizedProjectedPoints = optimized.projectedPoints;
     const projectedGain = optimizedProjectedPoints - currentProjectedPoints;
+
     console.group('Fantasy Edge Summary');
     console.log('Players Parsed:', roster.length);
     console.log('Current Projection:', currentProjectedPoints.toFixed(2));
     console.log('Optimized Projection:', optimizedProjectedPoints.toFixed(2));
     console.log('Potential Gain:', projectedGain.toFixed(2));
     console.groupEnd();
+
     (window as any).fantasyEdge = { roster, optimized, summary: { currentProjectedPoints, optimizedProjectedPoints, projectedGain } };
     const deviceId = await getDeviceId();
     send('FANTASY_EDGE_SYNC_ROSTER', {
@@ -90,8 +108,54 @@ async function runCollector() {
       roster,
       optimized,
     });
+    lastRosterFingerprint = fingerprint;
     console.info(`Fantasy Edge synced ${roster.length} players.`);
-  } catch (error) { console.error('Fantasy Edge Error', error); }
+    return true;
+  } catch (error) {
+    console.error('Fantasy Edge Error', error);
+    return false;
+  } finally {
+    rosterSyncInFlight = false;
+  }
+}
+
+function scheduleRosterRescans() {
+  const delays = [500, 1500, 3000, 6000];
+  delays.forEach(delay => window.setTimeout(() => { void syncRosterIfPresent(); }, delay));
+
+  let timer: number | undefined;
+  const observer = new MutationObserver(() => {
+    if (timer) window.clearTimeout(timer);
+    timer = window.setTimeout(() => { void syncRosterIfPresent(); }, 500);
+  });
+
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['class', 'data-group', 'data-player', 'data-pid', 'data-pos', 'data-team', 'value', 'checked', 'selected'],
+  });
+
+  document.addEventListener('click', event => {
+    const target = event.target instanceof Element ? event.target.closest('button,input[type="submit"],input[type="button"],a') : null;
+    if (!target) return;
+    window.setTimeout(() => { void syncRosterIfPresent(); }, 750);
+    window.setTimeout(() => { void syncRosterIfPresent(); }, 2000);
+  }, true);
+}
+
+async function runCollector() {
+  await syncConfigIfPresent();
+  scheduleConfigRescans();
+
+  const rosterRows = document.querySelectorAll('.player-row');
+  if (!rosterRows.length) {
+    console.debug(`Fantasy Edge: no supported roster rows on ${window.location.pathname}; skipping roster collection.`);
+    return;
+  }
+
+  await syncRosterIfPresent(true);
+  scheduleRosterRescans();
 }
 
 void runCollector();

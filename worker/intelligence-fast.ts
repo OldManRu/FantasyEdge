@@ -4,16 +4,19 @@ import { ensureIntelligenceSchema } from './intelligence';
 
 export type FastIntelligenceEnv = { DB: D1Database };
 type CsvRow = Record<string, string>;
-type RosterPlayer = { name?: string; position?: string; nflTeam?: string; projection?: number|null; averagePoints?: number|null };
+type RosterPlayer = { name?: string; position?: string; nflTeam?: string; projection?: number|null; averagePoints?: number|null; rosterGroup?: string };
 type WeeklySample = { week:number; points:number };
+type DevelopmentalContext = { eligible:boolean; yearsExp:number|null; depthRank:number|null; source:string };
 
-const MODEL_VERSION='fe-2026.4';
+const MODEL_VERSION='fe-2026.5';
 const NFLVERSE='https://github.com/nflverse/nflverse-data/releases/download';
+const POSITION_BASELINES:Record<string,number>={QB:13,RB:7.5,WR:7,TE:6,K:6,DL:8,LB:9,DB:8};
 
 function normalizeName(v=''){return v.toLowerCase().replace(/\b(jr|sr|ii|iii|iv)\.?\b/g,'').replace(/[^a-z0-9]/g,'').trim();}
 function playerKey(n:string,p=''){return `${normalizeName(n)}:${p.toUpperCase()}`;}
-function displayName(r:CsvRow){return r.player_display_name||r.player_name||r.full_name||r.display_name||r.name||'';}
+function displayName(r:CsvRow){return r.player_display_name||r.player_name||r.full_name||r.display_name||r.name||r.football_name||'';}
 function num(r:CsvRow,...keys:string[]){for(const k of keys){const raw=r[k];if(raw===undefined||raw==='')continue;const v=Number(raw);if(Number.isFinite(v))return v;}return 0;}
+function nullableNum(r:CsvRow,...keys:string[]){for(const k of keys){const raw=r[k];if(raw===undefined||raw==='')continue;const v=Number(raw);if(Number.isFinite(v))return v;}return null;}
 const avg=(v:number[])=>v.length?v.reduce((a,b)=>a+b,0)/v.length:0;
 
 function parseCsv(text:string):CsvRow[]{
@@ -24,12 +27,29 @@ function parseCsv(text:string):CsvRow[]{
 }
 async function fetchCsv(url:string){const r=await fetch(url,{headers:{'user-agent':'FantasyEdge/0.1'}});if(!r.ok)throw new Error(`${r.status} fetching ${url}`);return parseCsv(await r.text());}
 async function optionalCsv(url:string){try{return await fetchCsv(url);}catch{return[];}}
-
 async function latestRoster(db:D1Database){const r=await db.prepare(`SELECT roster_json FROM roster_syncs ORDER BY id DESC LIMIT 1`).first<{roster_json:string}>();if(!r?.roster_json)return[];try{return JSON.parse(r.roster_json) as RosterPlayer[];}catch{return[];}}
 
 function indexRows(rows:CsvRow[]){const map=new Map<string,CsvRow[]>();for(const r of rows){if(r.season_type&&r.season_type!=='REG')continue;const key=normalizeName(displayName(r));if(!key)continue;const list=map.get(key);if(list)list.push(r);else map.set(key,[r]);}return map;}
+function latestByName(rows:CsvRow[]){const map=new Map<string,CsvRow>();for(const r of rows){const key=normalizeName(displayName(r));if(key)map.set(key,r);}return map;}
+function depthByName(rows:CsvRow[]){const map=new Map<string,CsvRow>();for(const r of rows){const key=normalizeName(displayName(r));if(!key)continue;const existing=map.get(key);const rank=nullableNum(r,'depth_position','depth_order','depth_rank','position_order','pos_rank')??99;const oldRank=existing?(nullableNum(existing,'depth_position','depth_order','depth_rank','position_order','pos_rank')??99):999;if(rank<oldRank)map.set(key,r);}return map;}
 function samplesFor(index:Map<string,CsvRow[]>,player:RosterPlayer):WeeklySample[]{const rows=index.get(normalizeName(player.name??''))??[];const pos=(player.position??'').toUpperCase();return rows.map(r=>({week:num(r,'week'),points:scoreAmdFflStatRow(r,pos).points})).filter(x=>Number.isFinite(x.points)).sort((a,b)=>a.week-b.week);}
 function trendFor(s:WeeklySample[]){if(s.length<4)return'unknown';const recent=avg(s.slice(-3).map(x=>x.points)),prior=avg(s.slice(-6,-3).map(x=>x.points));if(!prior)return'steady';if(recent>=prior*1.12)return'up';if(recent<=prior*.88)return'down';return'steady';}
+
+function developmentalContext(player:RosterPlayer,rosterIndex:Map<string,CsvRow>,depthIndex:Map<string,CsvRow>):DevelopmentalContext{
+ const key=normalizeName(player.name??'');const rr=rosterIndex.get(key);const dr=depthIndex.get(key);
+ const years=rr?nullableNum(rr,'years_exp','years_experience','experience','exp'):null;
+ const rookieYear=rr?nullableNum(rr,'rookie_year','entry_year','draft_year'):null;
+ const eligible=(years!==null&&years<=1)||(rookieYear!==null&&rookieYear>=2025);
+ const depthRank=dr?nullableNum(dr,'depth_position','depth_order','depth_rank','position_order','pos_rank'):null;
+ return{eligible,yearsExp:years,depthRank,source:[rr?'roster':'',dr?'depth':''].filter(Boolean).join('+')||'none'};
+}
+function developmentalProjection(player:RosterPlayer,ctx:DevelopmentalContext){
+ const pos=(player.position??'').toUpperCase();const base=POSITION_BASELINES[pos];if(!ctx.eligible||!base)return null;
+ let role=.72;
+ if(ctx.depthRank!==null){if(ctx.depthRank<=1)role=1;else if(ctx.depthRank===2)role=.82;else if(ctx.depthRank===3)role=.62;else role=.45;}
+ else if(player.rosterGroup==='starter')role=.9;
+ return Number((base*role).toFixed(2));
+}
 
 export async function refreshIntelligenceFast(env:FastIntelligenceEnv){
  await ensureIntelligenceSchema(env.DB);
@@ -38,20 +58,20 @@ export async function refreshIntelligenceFast(env:FastIntelligenceEnv){
  const runId=Number(run.meta.last_row_id??0);
  try{
   const roster=await latestRoster(env.DB);if(!roster.length)throw new Error('No synchronized RTSports roster is available yet.');
-  const [s25,s26]=await Promise.all([
+  const [s25,s26,r26,d26]=await Promise.all([
    fetchCsv(`${NFLVERSE}/stats_player/stats_player_week_2025.csv`),
    optionalCsv(`${NFLVERSE}/stats_player/stats_player_week_2026.csv`),
+   optionalCsv(`${NFLVERSE}/rosters/roster_2026.csv`),
+   optionalCsv(`${NFLVERSE}/depth_charts/depth_charts_2026.csv`),
   ]);
-  const i25=indexRows(s25),i26=indexRows(s26),now=new Date().toISOString();
-  const stmts:D1PreparedStatement[]=[];
-  let modeled=0;
+  const i25=indexRows(s25),i26=indexRows(s26),ri=latestByName(r26),di=depthByName(d26),now=new Date().toISOString();
+  const stmts:D1PreparedStatement[]=[];let modeled=0,developmentalModeled=0;
   for(const player of roster){
    const name=player.name??'Unknown player',position=(player.position??'').toUpperCase(),team=(player.nflTeam??'').toUpperCase();
    const h=samplesFor(i25,player),c=samplesFor(i26,player),reasons=[`Fantasy scoring uses the AMD FFL ${AMDFFL_SCORING_VERSION} league rules.`];
    let projection:number|null=null,confidence=.25;
-   if(position==='HC'){
-    reasons.push('Head-coach projection is applied immediately after the fast player refresh.');
-   }else if(h.length||c.length){
+   if(position==='HC')reasons.push('Head-coach projection is applied immediately after the fast player refresh.');
+   else if(h.length||c.length){
     const recent=h.slice(-6).map(x=>x.points),season=h.map(x=>x.points);let baseline=season.length?avg(season)*.45+avg(recent)*.55:0;
     if(h.length)reasons.push(`2025 baseline uses ${h.length} regular-season games with extra weight on the final six.`);
     if(c.length){const ca=avg(c.map(x=>x.points)),w=Math.min(.8,.15+c.length*.11);baseline=baseline?baseline*(1-w)+ca*w:ca;reasons.push(`${c.length} 2026 game${c.length===1?'':'s'} contribute ${Math.round(w*100)}% of the performance baseline.`);}
@@ -60,15 +80,20 @@ export async function refreshIntelligenceFast(env:FastIntelligenceEnv){
    }else{
     const fallback=Number(player.projection??player.averagePoints??0);
     if(fallback>0){projection=Number(fallback.toFixed(2));confidence=.3;modeled++;reasons.push('No public weekly sample was found; temporary RTSports projection/average fallback is used until enriched data is available.');}
-    else reasons.push('No usable public weekly sample or RTSports fallback projection was available yet.');
+    else{
+      const ctx=developmentalContext(player,ri,di),dev=developmentalProjection(player,ctx);
+      if(dev!==null){projection=dev;confidence=ctx.depthRank!==null?.34:.28;modeled++;developmentalModeled++;reasons.push(`Developmental baseline applied because current nflverse roster metadata identifies this player as early-career${ctx.yearsExp!==null?` (${ctx.yearsExp} years experience)`:''}.`);reasons.push(ctx.depthRank!==null?`Depth-chart role rank ${ctx.depthRank} adjusts the ${position} positional baseline.`:`No reliable depth rank was available; the ${position} positional baseline is conservatively discounted.`);reasons.push('This is intentionally low-confidence and will yield to real 2026 NFL usage as soon as games are played.');}
+      else reasons.push('No usable public weekly sample, RTSports fallback, or verified developmental context was available yet.');
+    }
    }
    const key=playerKey(name,position),trend=(trendFor(c.length>=4?c:h) as 'up'|'down'|'steady'|'unknown');
-   stmts.push(env.DB.prepare(`INSERT INTO player_intelligence (player_key,display_name,position,nfl_team,projection,confidence,trend,reasons_json,source_games,model_version,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(player_key) DO UPDATE SET display_name=excluded.display_name,position=excluded.position,nfl_team=excluded.nfl_team,projection=excluded.projection,confidence=excluded.confidence,trend=excluded.trend,reasons_json=excluded.reasons_json,source_games=excluded.source_games,model_version=excluded.model_version,updated_at=excluded.updated_at`).bind(key,name,position,team,projection,Math.min(.95,confidence),trend,JSON.stringify(reasons),h.length+c.length,MODEL_VERSION,now));
-   stmts.push(env.DB.prepare(`INSERT INTO projection_snapshots (run_id,player_key,display_name,position,nfl_team,projection,confidence,trend,reasons_json,model_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(runId,key,name,position,team,projection,Math.min(.95,confidence),trend,JSON.stringify(reasons),MODEL_VERSION,now));
+   const conf=Math.min(.95,confidence);
+   stmts.push(env.DB.prepare(`INSERT INTO player_intelligence (player_key,display_name,position,nfl_team,projection,confidence,trend,reasons_json,source_games,model_version,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(player_key) DO UPDATE SET display_name=excluded.display_name,position=excluded.position,nfl_team=excluded.nfl_team,projection=excluded.projection,confidence=excluded.confidence,trend=excluded.trend,reasons_json=excluded.reasons_json,source_games=excluded.source_games,model_version=excluded.model_version,updated_at=excluded.updated_at`).bind(key,name,position,team,projection,conf,trend,JSON.stringify(reasons),h.length+c.length,MODEL_VERSION,now));
+   stmts.push(env.DB.prepare(`INSERT INTO projection_snapshots (run_id,player_key,display_name,position,nfl_team,projection,confidence,trend,reasons_json,model_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(runId,key,name,position,team,projection,conf,trend,JSON.stringify(reasons),MODEL_VERSION,now));
   }
   for(let i=0;i<stmts.length;i+=80)await env.DB.batch(stmts.slice(i,i+80));
-  const summary={stats2025Rows:s25.length,stats2026Rows:s26.length,scoringMode:'league',scoringVersion:AMDFFL_SCORING_VERSION,modelVersion:MODEL_VERSION,refreshMode:'interactive-fast',modeledPlayers:modeled};
-  await env.DB.prepare(`UPDATE intelligence_runs SET completed_at=?,status='success',source_summary=?,player_count=?,message=? WHERE id=?`).bind(now,JSON.stringify(summary),roster.length,`Fast projection refresh completed; ${modeled} players have usable projections.`,runId).run();
-  return{ok:true,runId,playerCount:roster.length,modeledPlayers:modeled,sourceSummary:summary,updatedAt:now};
+  const summary={stats2025Rows:s25.length,stats2026Rows:s26.length,roster2026Rows:r26.length,depth2026Rows:d26.length,scoringMode:'league',scoringVersion:AMDFFL_SCORING_VERSION,modelVersion:MODEL_VERSION,refreshMode:'interactive-fast',modeledPlayers:modeled,developmentalModeledPlayers:developmentalModeled};
+  await env.DB.prepare(`UPDATE intelligence_runs SET completed_at=?,status='success',source_summary=?,player_count=?,message=? WHERE id=?`).bind(now,JSON.stringify(summary),roster.length,`Fast projection refresh completed; ${modeled} players have usable projections (${developmentalModeled} developmental).`,runId).run();
+  return{ok:true,runId,playerCount:roster.length,modeledPlayers:modeled,developmentalModeledPlayers:developmentalModeled,sourceSummary:summary,updatedAt:now};
  }catch(error){const message=error instanceof Error?error.message:String(error);await env.DB.prepare(`UPDATE intelligence_runs SET completed_at=?,status='failed',message=? WHERE id=?`).bind(new Date().toISOString(),message,runId).run();return{ok:false,runId,error:message};}
 }

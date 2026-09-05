@@ -13,8 +13,8 @@ type SlotRule = { slot: string; count: number; eligiblePositions: string[] };
 type RulesSource = 'imported' | 'roster-derived' | 'fallback';
 type Candidate = { player: RosterPlayer; score: number | null; confidence: number; reasons: string[]; playerKey: string };
 type LineupItem = { slot: string; player: RosterPlayer; score: number | null; confidence: number; reasons: string[] };
-type AlternativeKind = 'safer-floor' | 'upside' | 'close-call' | 'unresolved-watch' | 'league-history';
-type Alternative = { kind: AlternativeKind; label: string; slot: string; start: RosterPlayer; bench: RosterPlayer; projectedDelta: number | null; confidence: number; explanation: string };
+type AlternativeKind = 'safer-floor' | 'upside' | 'close-call' | 'league-history';
+type Alternative = { kind: AlternativeKind; label: string; slot: string; start: RosterPlayer; bench: RosterPlayer; projectedDelta: number; confidence: number; explanation: string };
 
 const DEFAULT_RULES: SlotRule[] = [
   { slot: 'QB', count: 1, eligiblePositions: ['QB'] },
@@ -51,24 +51,14 @@ function inferSlot(label: string, key: string): SlotRule | null {
   const haystack = `${label} ${key}`.toLowerCase();
   const countMatch = haystack.match(/(?:start|starter|starting|minimum|min|max)?\s*(\d+)\s*(qb|quarterback|rb|running back|wr|wide receiver|te|tight end|k|kicker|dl|defensive line|lb|linebacker|db|defensive back|hc|head coach)/i);
   const patterns: Array<[RegExp, string, string[]]> = [
-    [/(quarterback|\bqb\b)/, 'QB', ['QB']],
-    [/(running back|\brb\b)/, 'RB', ['RB']],
-    [/(wide receiver|\bwr\b)/, 'WR', ['WR']],
-    [/(tight end|\bte\b)/, 'TE', ['TE']],
-    [/(head coach|\bhc\b)/, 'HC', ['HC']],
-    [/(kicker|\bk\b)/, 'K', ['K']],
-    [/(defensive line|\bdl\b)/, 'DL', ['DL']],
-    [/(linebacker|\blb\b)/, 'LB', ['LB']],
-    [/(defensive back|\bdb\b)/, 'DB', ['DB']],
+    [/(quarterback|\bqb\b)/, 'QB', ['QB']], [/(running back|\brb\b)/, 'RB', ['RB']], [/(wide receiver|\bwr\b)/, 'WR', ['WR']], [/(tight end|\bte\b)/, 'TE', ['TE']], [/(head coach|\bhc\b)/, 'HC', ['HC']], [/(kicker|\bk\b)/, 'K', ['K']], [/(defensive line|\bdl\b)/, 'DL', ['DL']], [/(linebacker|\blb\b)/, 'LB', ['LB']], [/(defensive back|\bdb\b)/, 'DB', ['DB']],
   ];
   if (/idp.*flex|flex.*idp/.test(haystack)) return { slot: 'IDP FLEX', count: 1, eligiblePositions: ['DL', 'LB', 'DB'] };
   if (/flex/.test(haystack)) {
     const eligible = positionsMentioned(haystack).filter(position => ['QB', 'RB', 'WR', 'TE'].includes(position));
     return { slot: 'FLEX', count: 1, eligiblePositions: eligible.length ? eligible : ['RB', 'WR'] };
   }
-  for (const [pattern, slot, eligiblePositions] of patterns) {
-    if (pattern.test(haystack)) return { slot, count: countMatch ? Number(countMatch[1]) : 1, eligiblePositions };
-  }
+  for (const [pattern, slot, eligiblePositions] of patterns) if (pattern.test(haystack)) return { slot, count: countMatch ? Number(countMatch[1]) : 1, eligiblePositions };
   return null;
 }
 
@@ -86,9 +76,7 @@ function ruleFromRosterSlot(label: string): Omit<SlotRule, 'count'> | null {
     if (offensive.length) return { slot: label, eligiblePositions: offensive };
     if (normalized.includes('FLEX')) return { slot: label, eligiblePositions: ['RB', 'WR'] };
   }
-  for (const position of KNOWN_POSITIONS) {
-    if (normalized === position || normalized.startsWith(`${position} `)) return { slot: label, eligiblePositions: [position] };
-  }
+  for (const position of KNOWN_POSITIONS) if (normalized === position || normalized.startsWith(`${position} `)) return { slot: label, eligiblePositions: [position] };
   return null;
 }
 
@@ -145,8 +133,7 @@ function projectionFor(player: RosterPlayer, intel: Map<string, Record<string, u
 }
 
 function confidenceFor(player: RosterPlayer, intel: Map<string, Record<string, unknown>>) {
-  const projection = projectionFor(player, intel);
-  if (projection === null) return 0;
+  if (projectionFor(player, intel) === null) return 0;
   return Number(intel.get(playerKey(player.name, player.position))?.confidence ?? .35);
 }
 
@@ -226,33 +213,23 @@ function buildAlternatives(lineup: LineupItem[], candidates: Candidate[], rules:
     const key = `${alternative.kind}:${alternative.slot}:${playerKey(alternative.start.name, alternative.start.position)}:${playerKey(alternative.bench.name, alternative.bench.position)}`;
     if (!seen.has(key)) { seen.add(key); alternatives.push(alternative); }
   };
-
   for (const incumbent of lineup) {
+    if (incumbent.score === null) continue;
     const rule = ruleForSlot(incumbent.slot, rules);
     if (!rule) continue;
-    const legalBench = candidates.filter(candidate => !used.has(candidate.playerKey) && isEligible(candidate.player, rule));
-    if (!legalBench.length) continue;
-
-    if (incumbent.score !== null) {
-      const known = legalBench.filter(candidate => candidate.score !== null) as Array<Candidate & { score: number }>;
-      const close = [...known]
-        .filter(candidate => candidate.score >= incumbent.score! * .85 || incumbent.score! - candidate.score <= 2)
-        .sort((a, b) => b.score - a.score)[0];
-      if (close) {
-        const delta = Number((close.score - incumbent.score).toFixed(2));
-        if (close.confidence >= incumbent.confidence + .08) {
-          add({ kind: 'safer-floor', label: 'Safer floor', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} is a legal ${incumbent.slot} alternative with similar expected scoring and a stronger confidence profile.` });
-        } else if (close.confidence <= incumbent.confidence - .08) {
-          add({ kind: 'upside', label: 'Upside alternative', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} remains close enough in projected scoring to consider when you prefer a higher-variance path.` });
-        } else {
-          add({ kind: 'close-call', label: 'Close call', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} is within the same decision band as ${incumbent.player.name}; the model does not see enough separation to treat the primary choice as automatic.` });
-        }
-      }
-
-      const unresolved = legalBench.find(candidate => candidate.score === null);
-      if (unresolved) {
-        add({ kind: 'unresolved-watch', label: 'Unresolved upside', slot: incumbent.slot, start: unresolved.player, bench: incumbent.player, projectedDelta: null, confidence: 0, explanation: `${unresolved.player.name} has insufficient usable projection evidence. Fantasy Edge is flagging the player for review rather than assigning a fake 0.0 projection.` });
-      }
+    const known = candidates.filter(candidate => !used.has(candidate.playerKey) && candidate.score !== null && isEligible(candidate.player, rule)) as Array<Candidate & { score: number }>;
+    if (!known.length) continue;
+    const close = [...known]
+      .filter(candidate => candidate.score >= incumbent.score! * .85 || incumbent.score! - candidate.score <= 2)
+      .sort((a, b) => b.score - a.score)[0];
+    if (!close) continue;
+    const delta = Number((close.score - incumbent.score).toFixed(2));
+    if (close.confidence >= incumbent.confidence + .08) {
+      add({ kind: 'safer-floor', label: 'Safer floor', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} is a legal ${incumbent.slot} alternative with similar expected scoring and a stronger confidence profile.` });
+    } else if (close.confidence <= incumbent.confidence - .08) {
+      add({ kind: 'upside', label: 'Upside alternative', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} remains close enough in projected scoring to consider when you prefer a higher-variance path.` });
+    } else {
+      add({ kind: 'close-call', label: 'Close call', slot: incumbent.slot, start: close.player, bench: incumbent.player, projectedDelta: delta, confidence: close.confidence, explanation: `${close.player.name} is within the same decision band as ${incumbent.player.name}; the model does not see enough separation to treat the primary choice as automatic.` });
     }
   }
   return alternatives.slice(0, 6);
@@ -268,13 +245,7 @@ export async function getOptimizedLineup(db: D1Database) {
     const key = playerKey(player.name, player.position);
     const modeled = intel.get(key);
     const score = projectionFor(player, intel);
-    return {
-      player,
-      score,
-      confidence: confidenceFor(player, intel),
-      reasons: modeled?.reasons_json ? JSON.parse(String(modeled.reasons_json)) : [],
-      playerKey: key,
-    };
+    return { player, score, confidence: confidenceFor(player, intel), reasons: modeled?.reasons_json ? JSON.parse(String(modeled.reasons_json)) : [], playerKey: key };
   });
 
   const { rules, source } = await deriveRules(db, roster);
@@ -286,6 +257,10 @@ export async function getOptimizedLineup(db: D1Database) {
   const changes = buildLegalChanges(starts, benchedStarters, rules, intel);
   const alternatives = buildAlternatives(lineup, candidates, rules);
   const unresolvedStarters = lineup.filter(item => item.score === null);
+  const unresolvedWatch = candidates
+    .filter(candidate => candidate.score === null && candidate.player.rosterGroup !== 'starter')
+    .map(candidate => ({ player: candidate.player, reason: 'Insufficient usable projection evidence; not treated as 0.0.' }))
+    .slice(0, 8);
   const modeledPoints = lineup.reduce((sum, item) => sum + (item.score ?? 0), 0);
 
   return {
@@ -297,6 +272,7 @@ export async function getOptimizedLineup(db: D1Database) {
     projectionComplete: unresolvedStarters.length === 0,
     unresolvedStarterCount: unresolvedStarters.length,
     unresolvedStarters: unresolvedStarters.map(item => ({ slot: item.slot, player: item.player })),
+    unresolvedWatch,
     lineup,
     changes,
     alternatives,

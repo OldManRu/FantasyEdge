@@ -115,9 +115,9 @@ function buildLegalChanges(
   const remaining = [...benchedStarters];
   const changes: Array<{
     start: RosterPlayer;
-    bench: RosterPlayer | null;
+    bench: RosterPlayer;
     slot: string;
-    projectedGain: number | null;
+    projectedGain: number;
     confidence: number;
   }> = [];
 
@@ -125,20 +125,12 @@ function buildLegalChanges(
     const rule = ruleForSlot(start.slot, rules);
     if (!rule) continue;
     const eligible = new Set(rule.eligiblePositions.map(position => position.toUpperCase()));
-
     const legal = remaining.filter(player => eligible.has((player.position ?? '').toUpperCase()));
-    if (!legal.length) {
-      // Do not publish an impossible START/BENCH recommendation. An open-slot move is
-      // only valid when there truly is no displaced starter eligible for this slot.
-      changes.push({
-        start: start.player,
-        bench: null,
-        slot: start.slot,
-        projectedGain: null,
-        confidence: start.confidence,
-      });
-      continue;
-    }
+
+    // Never publish an impossible substitution. If a complete legal START/BENCH pair
+    // cannot be proven for this slot, suppress the recommendation until the optimizer
+    // can express the full legal lineup transition.
+    if (!legal.length) continue;
 
     const sameSlot = legal.filter(player => slotLooksLike(player, start.slot));
     const pool = sameSlot.length ? sameSlot : legal;

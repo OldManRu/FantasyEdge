@@ -10,15 +10,9 @@ type RosterPlayer = {
 };
 
 type SlotRule = { slot: string; count: number; eligiblePositions: string[] };
+type RulesSource = 'imported' | 'roster-derived' | 'fallback';
 type Candidate = { player: RosterPlayer; score: number; confidence: number; reasons: string[]; playerKey: string };
-
-type LineupItem = {
-  slot: string;
-  player: RosterPlayer;
-  score: number;
-  confidence: number;
-  reasons: string[];
-};
+type LineupItem = { slot: string; player: RosterPlayer; score: number; confidence: number; reasons: string[] };
 
 const DEFAULT_RULES: SlotRule[] = [
   { slot: 'QB', count: 1, eligiblePositions: ['QB'] },
@@ -31,11 +25,12 @@ const DEFAULT_RULES: SlotRule[] = [
   { slot: 'LB', count: 2, eligiblePositions: ['LB'] },
   { slot: 'DB', count: 2, eligiblePositions: ['DB'] },
   { slot: 'FLEX', count: 2, eligiblePositions: ['RB', 'WR'] },
-  { slot: 'IDP FLEX', count: 1, eligiblePositions: ['LB', 'DB'] },
+  { slot: 'IDP FLEX', count: 1, eligiblePositions: ['DL', 'LB', 'DB'] },
 ];
 
+const KNOWN_POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DL', 'LB', 'DB', 'HC'] as const;
 const normalizeName = (value = '') => value.toLowerCase().replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '').replace(/[^a-z0-9]/g, '');
-const normalizeSlot = (value = '') => value.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+const normalizeSlot = (value = '') => value.toUpperCase().replace(/[^A-Z0-9/]+/g, ' ').trim();
 const playerKey = (name = '', position = '') => `${normalizeName(name)}:${position.toUpperCase()}`;
 const unavailable = (player: RosterPlayer) => player.rosterGroup === 'ir' || /^(IR|O)$/i.test(player.injury ?? '');
 
@@ -43,6 +38,11 @@ function parseCount(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value));
   const match = String(value ?? '').match(/\b(\d+)\b/);
   return match ? Math.max(0, Number(match[1])) : null;
+}
+
+function positionsMentioned(label: string) {
+  const upper = normalizeSlot(label);
+  return KNOWN_POSITIONS.filter(position => new RegExp(`(^|[^A-Z])${position}([^A-Z]|$)`).test(upper));
 }
 
 function inferSlot(label: string, key: string): SlotRule | null {
@@ -61,34 +61,78 @@ function inferSlot(label: string, key: string): SlotRule | null {
   ];
   if (/idp.*flex|flex.*idp/.test(haystack)) return { slot: 'IDP FLEX', count: 1, eligiblePositions: ['DL', 'LB', 'DB'] };
   if (/flex/.test(haystack)) {
-    const eligible = ['RB', 'WR', 'TE'].filter(pos => haystack.includes(pos.toLowerCase()) || haystack.includes({ RB: 'running back', WR: 'wide receiver', TE: 'tight end' }[pos as 'RB'|'WR'|'TE']));
-    return { slot: 'FLEX', count: 1, eligiblePositions: eligible.length ? eligible : ['RB', 'WR', 'TE'] };
+    const eligible = positionsMentioned(haystack).filter(position => ['QB', 'RB', 'WR', 'TE'].includes(position));
+    return { slot: 'FLEX', count: 1, eligiblePositions: eligible.length ? eligible : ['RB', 'WR'] };
   }
   for (const [pattern, slot, eligiblePositions] of patterns) if (pattern.test(haystack)) return { slot, count: countMatch ? Number(countMatch[1]) : 1, eligiblePositions };
   return null;
 }
 
-async function deriveRules(db: D1Database): Promise<{ rules: SlotRule[]; source: 'imported' | 'fallback' }> {
-  const latest = await db.prepare(`SELECT id FROM league_config_syncs ORDER BY id DESC LIMIT 1`).first<{ id: number }>();
-  if (!latest?.id) return { rules: DEFAULT_RULES, source: 'fallback' };
-  const rows = await db.prepare(`SELECT rule_key,label,value_json FROM league_rules WHERE config_sync_id=? AND category='lineup' ORDER BY id`).bind(latest.id).all<Record<string, unknown>>();
-  const bySlot = new Map<string, SlotRule>();
-  for (const row of rows.results) {
-    const inferred = inferSlot(String(row.label ?? ''), String(row.rule_key ?? ''));
-    if (!inferred) continue;
-    const parsed = row.value_json ? JSON.parse(String(row.value_json)) : null;
-    const count = parseCount(parsed);
-    if (count !== null) inferred.count = count;
-    if (inferred.count > 0) bySlot.set(inferred.slot, inferred);
+function ruleFromRosterSlot(label: string): Omit<SlotRule, 'count'> | null {
+  const normalized = normalizeSlot(label);
+  if (!normalized) return null;
+
+  const explicit = positionsMentioned(normalized);
+  const isIdpFlex = normalized.includes('FLEX') && (normalized.includes('IDP') || normalized.includes('DEF'));
+  if (isIdpFlex) {
+    const defensive = explicit.filter(position => ['DL', 'LB', 'DB'].includes(position));
+    return { slot: label, eligiblePositions: defensive.length ? defensive : ['DL', 'LB', 'DB'] };
   }
-  return bySlot.size ? { rules: [...bySlot.values()], source: 'imported' } : { rules: DEFAULT_RULES, source: 'fallback' };
+
+  if (normalized.includes('FLEX') || normalized.includes('/')) {
+    const offensive = explicit.filter(position => ['QB', 'RB', 'WR', 'TE'].includes(position));
+    if (offensive.length) return { slot: label, eligiblePositions: offensive };
+    if (normalized.includes('FLEX')) return { slot: label, eligiblePositions: ['RB', 'WR'] };
+  }
+
+  for (const position of KNOWN_POSITIONS) {
+    if (normalized === position || normalized.startsWith(`${position} `)) return { slot: label, eligiblePositions: [position] };
+  }
+  return null;
+}
+
+function deriveRulesFromRoster(roster: RosterPlayer[]): SlotRule[] {
+  const grouped = new Map<string, SlotRule>();
+  for (const player of roster.filter(item => item.rosterGroup === 'starter')) {
+    const label = player.lineupSlot?.trim();
+    if (!label) continue;
+    const inferred = ruleFromRosterSlot(label);
+    if (!inferred) continue;
+    const key = `${normalizeSlot(inferred.slot)}|${inferred.eligiblePositions.join(',')}`;
+    const existing = grouped.get(key);
+    if (existing) existing.count += 1;
+    else grouped.set(key, { ...inferred, count: 1 });
+  }
+  return [...grouped.values()];
+}
+
+async function deriveRules(db: D1Database, roster: RosterPlayer[]): Promise<{ rules: SlotRule[]; source: RulesSource }> {
+  const latest = await db.prepare(`SELECT id FROM league_config_syncs ORDER BY id DESC LIMIT 1`).first<{ id: number }>();
+  if (latest?.id) {
+    const rows = await db.prepare(`SELECT rule_key,label,value_json FROM league_rules WHERE config_sync_id=? AND category='lineup' ORDER BY id`).bind(latest.id).all<Record<string, unknown>>();
+    const bySlot = new Map<string, SlotRule>();
+    for (const row of rows.results) {
+      const inferred = inferSlot(String(row.label ?? ''), String(row.rule_key ?? ''));
+      if (!inferred) continue;
+      const parsed = row.value_json ? JSON.parse(String(row.value_json)) : null;
+      const count = parseCount(parsed);
+      if (count !== null) inferred.count = count;
+      if (inferred.count > 0) bySlot.set(inferred.slot, inferred);
+    }
+    if (bySlot.size) return { rules: [...bySlot.values()], source: 'imported' };
+  }
+
+  const rosterRules = deriveRulesFromRoster(roster);
+  const rosterRuleCount = rosterRules.reduce((sum, rule) => sum + rule.count, 0);
+  const starterCount = roster.filter(player => player.rosterGroup === 'starter').length;
+  if (rosterRules.length && rosterRuleCount === starterCount) return { rules: rosterRules, source: 'roster-derived' };
+
+  return { rules: DEFAULT_RULES, source: 'fallback' };
 }
 
 function scoreFor(player: RosterPlayer, intel: Map<string, Record<string, unknown>>) {
   const modeled = intel.get(playerKey(player.name, player.position));
-  return modeled?.projection !== null && modeled?.projection !== undefined
-    ? Number(modeled.projection)
-    : Number(player.projection ?? player.averagePoints ?? 0);
+  return modeled?.projection !== null && modeled?.projection !== undefined ? Number(modeled.projection) : Number(player.projection ?? player.averagePoints ?? 0);
 }
 
 function ruleForSlot(slot: string, rules: SlotRule[]) {
@@ -101,35 +145,19 @@ function slotLooksLike(player: RosterPlayer, slot: string) {
   const target = normalizeSlot(slot);
   if (!current || !target) return false;
   if (current === target) return true;
-  if (target === 'FLEX') return current.includes('FLEX') && !current.includes('IDP');
-  if (target === 'IDP FLEX') return current.includes('FLEX') && (current.includes('IDP') || current.includes('DEF'));
+  if (target.includes('FLEX')) return current.includes('FLEX') && (target.includes('IDP') === current.includes('IDP'));
   return current.startsWith(target);
 }
 
-function buildLegalChanges(
-  starts: LineupItem[],
-  benchedStarters: RosterPlayer[],
-  rules: SlotRule[],
-  intel: Map<string, Record<string, unknown>>,
-) {
+function buildLegalChanges(starts: LineupItem[], benchedStarters: RosterPlayer[], rules: SlotRule[], intel: Map<string, Record<string, unknown>>) {
   const remaining = [...benchedStarters];
-  const changes: Array<{
-    start: RosterPlayer;
-    bench: RosterPlayer;
-    slot: string;
-    projectedGain: number;
-    confidence: number;
-  }> = [];
+  const changes: Array<{ start: RosterPlayer; bench: RosterPlayer; slot: string; projectedGain: number; confidence: number }> = [];
 
   for (const start of starts) {
     const rule = ruleForSlot(start.slot, rules);
     if (!rule) continue;
     const eligible = new Set(rule.eligiblePositions.map(position => position.toUpperCase()));
     const legal = remaining.filter(player => eligible.has((player.position ?? '').toUpperCase()));
-
-    // Never publish an impossible substitution. If a complete legal START/BENCH pair
-    // cannot be proven for this slot, suppress the recommendation until the optimizer
-    // can express the full legal lineup transition.
     if (!legal.length) continue;
 
     const sameSlot = legal.filter(player => slotLooksLike(player, start.slot));
@@ -138,15 +166,10 @@ function buildLegalChanges(
     const benchIndex = remaining.findIndex(player => playerKey(player.name, player.position) === playerKey(bench.name, bench.position));
     if (benchIndex >= 0) remaining.splice(benchIndex, 1);
 
-    changes.push({
-      start: start.player,
-      bench,
-      slot: start.slot,
-      projectedGain: Number((start.score - scoreFor(bench, intel)).toFixed(2)),
-      confidence: start.confidence,
-    });
+    const gain = Number((start.score - scoreFor(bench, intel)).toFixed(2));
+    if (gain <= 0) continue;
+    changes.push({ start: start.player, bench, slot: start.slot, projectedGain: gain, confidence: start.confidence });
   }
-
   return changes;
 }
 
@@ -162,7 +185,8 @@ export async function getOptimizedLineup(db: D1Database) {
     const score = modeled?.projection !== null && modeled?.projection !== undefined ? Number(modeled.projection) : Number(player.projection ?? player.averagePoints ?? 0);
     return { player, score, confidence: Number(modeled?.confidence ?? 0.35), reasons: modeled?.reasons_json ? JSON.parse(String(modeled.reasons_json)) : [], playerKey: key };
   });
-  const { rules, source } = await deriveRules(db);
+
+  const { rules, source } = await deriveRules(db, roster);
   const used = new Set<string>();
   const lineup: LineupItem[] = [];
   for (const rule of rules) {
